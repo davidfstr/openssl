@@ -41,6 +41,9 @@ static const char delimiter = '-';
  *  return k + (((base - tmin + 1) * delta) div (delta + skew))
  */
 
+/*@ requires numpoints >= 1;
+    assigns \nothing;
+*/
 static int adapt(unsigned int delta, unsigned int numpoints,
     unsigned int firsttime)
 {
@@ -49,6 +52,9 @@ static int adapt(unsigned int delta, unsigned int numpoints,
     delta = (firsttime) ? delta / damp : delta / 2;
     delta = delta + delta / numpoints;
 
+    /*@ loop assigns delta, k;
+        loop variant delta;
+    */
     while (delta > ((base - tmin) * tmax) / 2) {
         delta = delta / (base - tmin);
         k = k + base;
@@ -57,6 +63,7 @@ static int adapt(unsigned int delta, unsigned int numpoints,
     return k + (((base - tmin + 1) * delta) / (delta + skew));
 }
 
+/*@ assigns \nothing; */
 static ossl_inline int is_basic(unsigned int a)
 {
     return (a < 0x80) ? 1 : 0;
@@ -69,6 +76,7 @@ static ossl_inline int is_basic(unsigned int a)
  * 61..7A (a-z) =  0 to 25, respectively
  * 30..39 (0-9) = 26 to 35, respectively
  */
+/*@ assigns \nothing; */
 static ossl_inline int digit_decoded(const unsigned char a)
 {
     if (a >= 0x41 && a <= 0x5A)
@@ -116,6 +124,14 @@ static ossl_inline int digit_decoded(const unsigned char a)
  *  end
  */
 
+/*@ requires enc_len >= 0;
+    requires enc_len <= UINT_MAX;
+    requires \valid_read(pEncoded + (0 .. enc_len - 1));
+    requires \valid(pout_length);
+    requires *pout_length >= 0;
+    requires *pout_length < UINT_MAX;
+    requires \valid(pDecoded + (0 .. *pout_length - 1));
+*/
 int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
     unsigned int *pDecoded, unsigned int *pout_length)
 {
@@ -130,15 +146,33 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
 
     if (enc_len >= UINT_MAX)
         return 0;
+    /*@ loop invariant 0 <= loop <= enc_len;
+        loop invariant
+            (basic_count == enc_len == 0) ||
+            (0 <= basic_count < enc_len);
+        loop assigns loop, basic_count;
+        loop variant enc_len - loop;
+    */
     for (loop = 0; loop < (unsigned int)enc_len; loop++) {
         if (pEncoded[loop] == delimiter)
             basic_count = loop;
     }
+    /*@ assert
+            (basic_count == enc_len == 0) ||
+            (0 <= basic_count < enc_len);
+    */
 
     if (basic_count > 0) {
+        /*@ assert 0 <= basic_count < enc_len; */
+
         if (basic_count > max_out)
             return 0;
 
+        /*@ loop invariant 0 <= loop <= basic_count;
+            loop invariant written_out == loop;
+            loop assigns loop, written_out, pDecoded[0 .. basic_count - 1];
+            loop variant basic_count - loop;
+        */
         for (loop = 0; loop < basic_count; loop++) {
             if (is_basic(pEncoded[loop]) == 0)
                 return 0;
@@ -148,16 +182,30 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
         }
         processed_in = basic_count + 1;
     }
+    /*@ assert 0 <= processed_in <= enc_len; */
+    /*@ assert (written_out == 0) || (written_out == basic_count); */
 
+    /*@ loop invariant processed_in <= loop <= enc_len;
+        loop invariant (written_out == 0) || (0 <= written_out <= max_out);
+        loop assigns loop, i, bias, n, pDecoded[0 .. max_out - 1], written_out;
+        loop variant enc_len - loop;
+    */
     for (loop = processed_in; loop < (unsigned int)enc_len;) {
         unsigned int oldi = i;
         unsigned int w = 1;
         unsigned int k, t;
         int digit;
 
+        /*@ loop invariant processed_in <= loop <= enc_len;
+            loop invariant w >= 1;
+            loop invariant loop >= \at(loop, LoopEntry);
+            loop assigns k, digit, loop, i, t, w;
+            loop variant enc_len - loop;
+        */
         for (k = base;; k += base) {
             if (loop >= enc_len)
                 return 0;
+            /*@ assert 0 <= processed_in <= loop < enc_len; */
 
             digit = digit_decoded(pEncoded[loop]);
             loop++;
@@ -170,24 +218,31 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
             i = i + digit * w;
             t = (k <= bias) ? tmin : (k >= bias + tmax) ? tmax
                                                         : k - bias;
+            /*@ assert tmin <= t <= tmax; */
 
             if ((unsigned int)digit < t)
                 break;
 
+            /*@ assert (base - t) > 0; */
             if (w > maxint / (base - t))
                 return 0;
+            /*@ assert w * (base - t) <= maxint; */
             w = w * (base - t);
         }
 
+        /*@ assert written_out + 1 <= UINT_MAX; */
         bias = adapt(i - oldi, written_out + 1, (oldi == 0));
         if (i / (written_out + 1) > maxint - n)
             return 0;
         n = n + i / (written_out + 1);
         i %= (written_out + 1);
+        /*@ assert 0 <= i <= written_out; */
 
         if (written_out >= max_out)
             return 0;
+        /*@ assert written_out < max_out; */
 
+        /*@ assert 0 <= i < max_out; */
         memmove(pDecoded + i + 1, pDecoded + i,
             (written_out - i) * sizeof(*pDecoded));
         pDecoded[i] = n;
