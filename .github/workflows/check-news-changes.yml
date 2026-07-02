@@ -7,7 +7,7 @@
 
 name: "Scan to check for NEWS/CHANGES suggestions"
 
-on: pull_request
+on: workflow_dispatch
 env:
   NEED_NEWS_CHANGES: "no"
   SKIP_NEWS_CHECK: "no"
