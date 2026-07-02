@@ -1,0 +1,7 @@
+# Frama-C / WP working artifacts -- regenerable, not part of the proof source.
+# NB: the committed WP proof cache (punycode/wp-cache/) is deliberately NOT
+# ignored -- it is a checked-in input that lets CI replay proofs (see README).
+*.session/
+.frama-c/
+*.wp/
+**/swapfile
