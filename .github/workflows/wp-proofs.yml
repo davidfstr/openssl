@@ -1,0 +1,106 @@
+# Copyright 2026 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
+name: Formal verification (WP proofs)
+# Runs the Frama-C/WP deductive proofs under proof/ (see proof/README.md).
+# Today this is one proof: ossl_punycode_decode in crypto/punycode.c is proved
+# memory-safe, divide-by-zero-free, and terminating for ALL inputs -- not tested,
+# proved, symbolically -- against the ACSL contracts written inline in that file.
+#
+# The proof runs inside a version-pinned Docker toolchain (proof/docker/Dockerfile:
+# Frama-C 31.0 + Alt-Ergo + Z3 + cvc5, all pinned) and replays a committed WP
+# proof cache (proof/punycode/wp-cache/), so a green run does not depend on any
+# solver being fast on the day -- it discharges every goal from the cache.
+#
+# NON-BLOCKING BY DESIGN: this job is continue-on-error, so a broken proof never
+# blocks a merge; instead it raises a warning annotation and a step summary. The
+# intent is to gain experience running proofs in CI (and to shake out any
+# flakiness) before considering making them gate anything. A future step could be
+# to gate a stable RELEASE (not every PR) on a clean proof run.
+#
+# What a green check does and does NOT mean is spelled out by run_proofs.pl on
+# success (trust base, caller obligations, and that only ossl_punycode_decode --
+# not ossl_a2ulabel -- is in scope). Read that, not just the checkmark.
+#
+# If a change of yours breaks the proof and you cannot repair the ACSL
+# annotations, the point of contact is David Foster (@davidfstr).
+
+on:
+  pull_request:
+    paths:
+      - 'crypto/punycode.c'
+      - 'proof/**'
+      - '.github/workflows/wp-proofs.yml'
+  schedule:
+    # Daily drift backstop: catches toolchain/base-image rot even when nobody
+    # touches the proved code.
+    - cron: '30 04 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wp-proofs:
+    # Only run the scheduled backstop on the canonical repo; PR and manual runs
+    # still work on forks (so contributors get proof feedback on their own CI).
+    if: github.event_name != 'schedule' || github.repository == 'openssl/openssl'
+    name: WP proofs
+    runs-on: ubuntu-latest
+    # Non-blocking: a failed proof must not fail the workflow run / block a merge.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run WP proofs (pinned Docker toolchain, committed cache --load)
+        # --load builds the pinned image (base image pulled anonymously; no
+        # registry credentials needed) and, for every proof, runs check-scope then
+        # verifies against the committed wp-cache/ in OFFLINE mode: no solver is
+        # ever run, so a green check is deterministic and cannot flake on solver
+        # timing. Exit non-zero on any unproven goal, scope drift, OR a cache miss
+        # -- a miss means the committed cache is stale for the current source or
+        # toolchain and must be regenerated locally with ./proof/run_proofs.pl --save.
+        run: |
+          set -o pipefail
+          ./proof/run_proofs.pl --load 2>&1 | tee "$RUNNER_TEMP/wp-proofs.log"
+
+      - name: Record success (trust base travels with the result)
+        if: success()
+        # The success banner printed by run_proofs.pl restates the trust base,
+        # caller obligations, and scope. Surface it in the run summary so the
+        # green check is never read as an unqualified "memory-safe, no caveats".
+        run: |
+          {
+            echo '## WP proofs passed';
+            echo '';
+            echo 'Proved symbolically for all inputs, modulo the trust base below.';
+            echo '';
+            echo '```';
+            sed -n '/ALL PROOFS PASSED/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Flag proof failure (non-blocking warning)
+        if: failure()
+        # continue-on-error keeps this from blocking the merge; the annotation and
+        # summary make the regression visible to whoever touched the proved code.
+        run: |
+          echo "::warning title=WP proof failed::A Frama-C/WP proof under proof/ did not pass. This does NOT block merge, but the proved property (e.g. memory safety of ossl_punycode_decode) is no longer verified. See the job summary; contact @davidfstr if you need help repairing the annotations."
+          {
+            echo '## :warning: WP proofs FAILED (non-blocking)';
+            echo '';
+            echo 'A verification obligation could not be discharged, or the proved';
+            echo 'function scope drifted. This does not block the merge, but the';
+            echo 'proved property is no longer verified. Full log:';
+            echo '';
+            echo '```';
+            cat "$RUNNER_TEMP/wp-proofs.log";
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"

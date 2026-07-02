@@ -79,15 +79,24 @@
 #
 #   -wp-timeout 30
 #               Generous per-goal timeout (~15x the time any goal needs on a
-#               developer box) so a slow CI runner never produces a false red
-#               "timeout" failure. With the committed proof cache (replay mode,
-#               below) goals are normally replayed without calling a solver at
-#               all, so this only matters on a cache miss.
+#               developer box) so a slow runner never produces a false red
+#               "timeout" failure. With the committed proof cache served (offline
+#               or replay) goals are discharged without calling a solver at all,
+#               so this only bites on a cache miss.
 #
-#   -wp-cache replay / -wp-cache-dir wp-cache/ (see CACHE section below)
-#               Replay recorded proofs from the committed wp-cache/ directory
-#               instead of rediscovering them each run -- the single biggest
-#               robustness win against timeout flakiness in CI.
+#   -wp-par N (FRAMAC_WP_PAR, default 8)
+#               Concurrent prover processes. 8 races the portfolio for speed, but
+#               then WHICH solver first closes a goal is timing-dependent, so the
+#               resulting cache is machine-specific. 1 runs one prover at a time in
+#               list order, so the winning prover per goal is capability- (not
+#               timing-) determined and identical on every machine -- this is what
+#               makes a regenerated cache reproducible. run_proofs.pl uses 8 for
+#               fast local proving and 1 when regenerating the committed cache.
+#
+#   -wp-cache <mode> / -wp-cache-dir <dir> (FRAMAC_WP_CACHE / FRAMAC_WP_CACHEDIR)
+#               Serve recorded proofs from a cache dir instead of rediscovering
+#               them each run -- the single biggest robustness win against timeout
+#               flakiness. See the CACHE section for the modes.
 #
 # RESULT: 104 / 104 goals proved in scope. The only residue is the memmove_uint
 # trust-base stub described above. Scope honesty: this covers
@@ -101,7 +110,9 @@
 #   ./run_wp.sh [prove|report|check-scope]
 #
 #   prove       -- (default) run WP+RTE, the proof itself. Lists per-VC goal
-#                  results with WP-internal names.
+#                  results with WP-internal names. GATES on completeness: Frama-C
+#                  exits 0 even with unproved goals, so this mode parses the
+#                  "Proved goals: N / M" summary and exits 1 unless N == M.
 #   report      -- the "scoreboard": run WP+RTE, then list every UNPROVEN
 #                  obligation as  file:line [status] kind: predicate,  using real
 #                  source locations from the Report plugin CSV. A different VIEW
@@ -116,6 +127,7 @@
 # Environment:
 #   FRAMAC_WP_CACHE     WP cache mode (default: replay). See CACHE section.
 #   FRAMAC_WP_CACHEDIR  Override the cache directory (default: ./wp-cache).
+#   FRAMAC_WP_PAR       Concurrent prover processes (default: 8; 1 = deterministic).
 # ----------------------------------------------------------------------------
 set -eu
 
@@ -154,28 +166,51 @@ SRC="$REPO_ROOT/crypto/punycode.c"
 TARGET_CPP="-cpp-extra-args=-I$REPO_ROOT/include"
 TARGET_FCT="$(printf '%s' "$SCOPE_FCTS" | tr ' ' ',')"
 
-# CACHE: replay recorded proofs from the committed wp-cache/ so CI (and repeat
-# local runs) skip the solvers entirely on a hit. The two env vars below override
-# these defaults without editing the script (read here and passed as flags):
-#   replay  = use the cache; on a MISS run the solvers but do NOT update the
-#             cache (so a stale/broken cache surfaces as real solver work, and CI
-#             never silently rewrites the committed cache).
-#   update  = use the cache, and WRITE new/changed entries -- used once, locally,
-#             to (re)populate wp-cache/ after an intended proof change.
+# CACHE: serve recorded proofs from a cache dir so a run skips the solvers on a
+# hit. Mode/dir/parallelism come from the env vars below (defaults here);
+# run_proofs.pl sets them per its three workflows -- see that script for policy:
+#   update  = use cache, run solvers on a MISS, and WRITE new entries. Fast local
+#             proving writes into a SCRATCH (gitignored) dir, so stale entries
+#             accumulate harmlessly and the committed cache is never touched.
+#   rebuild = always run solvers and write -- used by 'run_proofs.pl --save' (with
+#             FRAMAC_WP_PAR=1) to regenerate the COMMITTED wp-cache/ deterministically.
+#   offline = use cache but NEVER run a solver; a miss leaves the goal unproved,
+#             which the 'prove' gate turns into exit 1 -- used by
+#             'run_proofs.pl --load' to verify against the committed cache and to
+#             detect a stale cache (any miss => regenerate with --save).
+#   replay  = like offline but runs solvers on a miss (no write); friendliest for
+#             ad-hoc standalone checks, so it is this script's default.
 CACHE_MODE="${FRAMAC_WP_CACHE:-replay}"
 CACHE_DIR="${FRAMAC_WP_CACHEDIR:-$SCRIPT_DIR/wp-cache}"
+PAR="${FRAMAC_WP_PAR:-8}"
 
 # Build the WP argv (prove/report) from the setup above. Kept in "$@" so a path
 # with separators stays one properly-quoted argument.
 set --
 set -- "$@" "$TARGET_CPP"
 set -- "$@" -instantiate -wp -wp-rte -wp-prover "$PROVERS" -wp-timeout "$TIMEOUT"
+set -- "$@" -wp-par "$PAR"
 set -- "$@" -wp-cache "$CACHE_MODE" -wp-cache-dir "$CACHE_DIR"
 set -- "$@" -wp-fct "$TARGET_FCT"
 
 case "$MODE" in
     prove)
-        frama-c "$@" "$SRC"
+        # Frama-C exits 0 even when WP goals are left unproved, so its exit code
+        # alone does NOT gate the proof. Capture the run, echo it, then enforce
+        # completeness from the "Proved goals: N / M" summary: N < M (or a missing
+        # summary, e.g. an offline cache miss) is a hard failure.
+        set +e
+        out=$(frama-c "$@" "$SRC" 2>&1); rc=$?
+        set -e
+        printf '%s\n' "$out"
+        [ "$rc" -eq 0 ] || exit "$rc"     # parse/user error etc. -- propagate
+        line=$(printf '%s\n' "$out" | grep -E 'Proved goals:' | tail -1)
+        n=$(printf '%s' "$line" | sed -n 's/.*Proved goals: *\([0-9][0-9]*\) *\/ *\([0-9][0-9]*\).*/\1/p')
+        m=$(printf '%s' "$line" | sed -n 's/.*Proved goals: *\([0-9][0-9]*\) *\/ *\([0-9][0-9]*\).*/\2/p')
+        if [ -z "$m" ] || [ "$n" != "$m" ]; then
+            echo "run_wp.sh: WP did not prove all goals (${line:-no 'Proved goals' summary})" >&2
+            exit 1
+        fi
         ;;
     report)
         CSV="$(mktemp)"

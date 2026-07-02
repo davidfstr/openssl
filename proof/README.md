@@ -12,18 +12,42 @@ proof/
   docker/Dockerfile    pinned Frama-C + Alt-Ergo + Z3 + cvc5 toolchain
   punycode/
     run_wp.sh          the punycode WP runner (prove | report | check-scope)
-    wp-cache/          committed WP proof cache (CI replays it; see below)
+    wp-cache/          committed WP proof cache (CI --load replays it; see below)
 ```
 
 ## Running
 
+`run_proofs.pl` has three workflows that differ only in how they use the
+committed WP proof cache:
+
 ```sh
-./proof/run_proofs.pl              # all proofs, inside the pinned Docker toolchain
-./proof/run_proofs.pl --no-docker  # use a local Frama-C install instead
+./proof/run_proofs.pl              # (default) PROVE locally: race the solvers,
+                                   #   cache to a gitignored scratch dir. Fast;
+                                   #   for a human iterating on the proof.
+./proof/run_proofs.pl --load       # USE the committed cache only, no solver runs;
+                                   #   fail on any miss. Deterministic; CI uses this.
+./proof/run_proofs.pl --save       # REGENERATE the committed cache from scratch,
+                                   #   deterministically (must run in Docker); commit it.
+./proof/run_proofs.pl --no-docker  # any of the above against a local Frama-C
+                                   #   (not allowed with --save)
 ```
 
-Exit status is 0 iff every proof passes. The per-proof runner can also be driven
-directly (needs a local Frama-C 31.0 with Alt-Ergo, Z3, cvc5 on `PATH`):
+Exit status is 0 iff every proof passes. Note Frama-C itself exits 0 even with
+unproved goals, so the runner gates explicitly on `Proved goals: N / M` (`N == M`);
+under `--load` a cache miss leaves goals unproved and thus fails, which is exactly
+how a stale committed cache is detected — regenerate it with `--save`.
+
+**Updating the committed cache.** Regenerate (`--save`) after any change that
+alters the proof obligations — the C code or its ACSL annotations, a Frama-C or
+solver version bump in the Dockerfile, or an obligation-affecting flag in
+`run_wp.sh` — then commit `proof/*/wp-cache/`. There is no mtime heuristic: the
+cache is content-addressed (keyed on the goal formula + solver version), so
+`--load` detecting a miss *is* the staleness check. `--save` runs one prover at a
+time in a fixed order so the winning solver per goal — and hence the cache — is
+identical on every machine (an 8-way race would make it host-specific).
+
+The per-proof runner can also be driven directly (needs a local Frama-C 31.0 with
+Alt-Ergo, Z3, cvc5 on `PATH`):
 
 ```sh
 ./proof/punycode/run_wp.sh prove        # the proof (per-VC results)

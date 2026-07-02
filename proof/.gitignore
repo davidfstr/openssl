@@ -5,3 +5,9 @@
 .frama-c/
 *.wp/
 **/swapfile
+
+# Scratch WP cache written by a plain (fast, local) ./run_proofs.pl. Distinct
+# from the committed wp-cache/: this one may hold nondeterministic race-winner
+# entries and is never part of the proof artifact. Regenerate the committed
+# cache with ./run_proofs.pl --save.
+**/.wp-cache-local/
