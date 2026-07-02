@@ -144,7 +144,6 @@ static ossl_inline int digit_decoded(const unsigned char a)
  *  end
  */
 /*@ requires enc_len >= 0;
-    requires enc_len <= UINT_MAX;
     requires \valid_read(pEncoded + (0 .. enc_len - 1));
     requires \valid(pout_length);
     requires *pout_length >= 0;
@@ -162,9 +161,6 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
     unsigned int max_out = *pout_length;
     unsigned int basic_count = 0;
     unsigned int loop;
-
-    if (enc_len >= UINT_MAX)
-        return 0;
 
     /*
      * Search for the last '-' delimiter, storing the number of
