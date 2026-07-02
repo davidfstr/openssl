@@ -71,18 +71,18 @@ EOF
     }
 }
 
-# --- run each proof: check-scope, then prove --------------------------------
-my @modes = $update_cache ? ("prove") : ("check-scope", "prove");
+# --- run each proof ---------------------------------------------------------
 my @failures;
 for my $runner (@runners) {
     my $name = basename(dirname($runner));           # e.g. "punycode"
-    for my $mode (@modes) {
-        # The committed cache is only consulted by 'prove'. Default replay; when
-        # --update-cache is given, run 'prove' in update mode to (re)write it.
-        my $cache = ($mode eq "prove" && $update_cache) ? "update" : "replay";
-        print "\n=== proof: $name  ($mode, cache=$cache) ===\n";
-        my $rc = run_proof($name, $mode, $cache);
-        push @failures, "$name/$mode" if $rc != 0;
+    if ($update_cache) {
+        push @failures, "$name/update-cache" unless update_cache_for($name);
+    } else {
+        # check-scope (drift guard) then prove (replays the committed cache).
+        for my $mode ("check-scope", "prove") {
+            print "\n=== proof: $name  ($mode, cache=replay) ===\n";
+            push @failures, "$name/$mode" if run_proof($name, $mode, "replay") != 0;
+        }
     }
 }
 
@@ -100,22 +100,52 @@ exit 0;
 
 # ---------------------------------------------------------------------------
 
-# Run one proof/mode, either in the container or natively. The per-proof runner
-# resolves the repo root from its own location, so cwd does not matter natively;
-# in the container the repo is bind-mounted at /src and run_wp.sh lives at the
-# same relative path.
-sub run_proof {
+# Build the argv to run one proof/mode, either in the container or natively. The
+# per-proof runner resolves the repo root from its own location, so cwd does not
+# matter natively; in the container the repo is bind-mounted at /src and
+# run_wp.sh lives at the same relative path. Cache mode is passed via the
+# FRAMAC_WP_CACHE env var (docker -e, or the child's environment natively).
+sub proof_cmd {
     my ($name, $mode, $cache) = @_;
     my $rel = "proof/$name/run_wp.sh";
     if ($use_docker) {
-        return run_cmd("docker", "run", "--rm",
-                       "-v", "$REPO_ROOT:/src", "-w", "/src",
-                       "-e", "FRAMAC_WP_CACHE=$cache",
-                       $IMAGE, $rel, $mode);
+        return ("docker", "run", "--rm",
+                "-v", "$REPO_ROOT:/src", "-w", "/src",
+                "-e", "FRAMAC_WP_CACHE=$cache",
+                $IMAGE, $rel, $mode);
     } else {
-        local $ENV{FRAMAC_WP_CACHE} = $cache;
-        return run_cmd("$REPO_ROOT/$rel", $mode);
+        $ENV{FRAMAC_WP_CACHE} = $cache;   # inherited by the child
+        return ("$REPO_ROOT/$rel", $mode);
     }
+}
+
+sub run_proof {
+    my ($name, $mode, $cache) = @_;
+    return run_cmd(proof_cmd($name, $mode, $cache));
+}
+
+# (Re)populate one proof's committed WP cache, converging over repeated passes.
+# The prover portfolio races Alt-Ergo/Z3/cvc5, so which solver first closes a
+# contested goal -- and thus that goal's cache key -- can vary run to run. One
+# 'update' pass therefore may leave a few goals uncached; we re-run until a pass
+# writes nothing new (or a safety cap), so the committed cache replays as a full
+# hit in CI. Returns true on success.
+sub update_cache_for {
+    my ($name) = @_;
+    my $MAX_PASSES = 6;
+    for my $pass (1 .. $MAX_PASSES) {
+        print "\n=== proof: $name  (prove, cache=update, pass $pass) ===\n";
+        my ($rc, $out) = run_capture(proof_cmd($name, "prove", "update"));
+        return 0 if $rc != 0;
+        # WP prints "[Cache] found:N" when nothing new was written, or
+        # "[Cache] ... updated:M" when it added M entries. Stable once no updates.
+        if ($out !~ /\bupdated:(\d+)/ || $1 == 0) {
+            print "cache stable for $name after pass $pass\n";
+            return 1;
+        }
+    }
+    print STDERR "cache for $name did not stabilise within $MAX_PASSES passes\n";
+    return 0;
 }
 
 # system() wrapper returning the child's exit code (or non-zero on spawn/signal).
@@ -123,9 +153,31 @@ sub run_cmd {
     my @cmd = @_;
     print "+ @cmd\n";
     my $status = system(@cmd);
-    if ($status == -1)      { print STDERR "failed to run: $cmd[0]: $!\n"; return 127; }
-    elsif ($status & 127)   { return 128 + ($status & 127); }   # died on signal
-    else                    { return $status >> 8; }
+    return exit_code($status, $cmd[0]);
+}
+
+# Like run_cmd, but also captures combined stdout+stderr (still echoed live).
+# Returns (exit_code, captured_text).
+sub run_capture {
+    my @cmd = @_;
+    print "+ @cmd\n";
+    my $out = "";
+    my $pid = open(my $fh, "-|");
+    die "fork failed: $!\n" unless defined $pid;
+    if ($pid == 0) {                 # child
+        open(STDERR, ">&", \*STDOUT) or die;
+        exec { $cmd[0] } @cmd or die "exec failed: $cmd[0]: $!\n";
+    }
+    while (my $line = <$fh>) { print $line; $out .= $line; }
+    close($fh);
+    return (exit_code($?, $cmd[0]), $out);
+}
+
+sub exit_code {
+    my ($status, $prog) = @_;
+    if ($status == -1)    { print STDERR "failed to run: $prog: $!\n"; return 127; }
+    elsif ($status & 127) { return 128 + ($status & 127); }   # died on signal
+    else                  { return $status >> 8; }
 }
 
 sub print_success {
