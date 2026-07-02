@@ -26,6 +26,10 @@ static const char delimiter = '-';
 
 #define LABEL_BUF_SIZE 512
 
+/*
+ * Computes a new "bias" value, which is a logarithm-like measure of the most
+ * recent "delta"'s magnitude.
+ */
 /*-
  * Pseudocode:
  *
@@ -40,7 +44,6 @@ static const char delimiter = '-';
  *  end
  *  return k + (((base - tmin + 1) * delta) div (delta + skew))
  */
-
 /*@ requires numpoints >= 1;
     assigns \nothing;
 */
@@ -92,6 +95,23 @@ static ossl_inline int digit_decoded(const unsigned char a)
 }
 
 /*-
+ * Decodes a buffer of Punycode bytes (pEncoded, length enc_len) to a
+ * UTF-32 buffer (pDecoded, capacity *pout_length). Returns 1 on success,
+ * else 0. On success stores the length of the decoded UTF-32 string in
+ * *pout_length.
+ *
+ * Examples:
+ * - "" -> ""                   (empty string)
+ * - "a-" -> U"a"               (only ASCII codepoints)
+ * - "Mnchen-3ya" -> U"München" (1 non-ASCII codepoint; rest are ASCII)
+ * - "mxacd" -> U"αβγ"          (all non-ASCII codepoints)
+ *
+ * Special preconditions:
+ * - The caller MUST ensure (enc_len <= UINT_MAX) so that this function
+ *   terminates.
+ * - The caller MUST ensure (*pout_length < UINT_MAX) to avoid a divide-by-zero.
+ */
+/*-
  * Pseudocode:
  *
  * function ossl_punycode_decode
@@ -123,7 +143,6 @@ static ossl_inline int digit_decoded(const unsigned char a)
  *    increment i
  *  end
  */
-
 /*@ requires enc_len >= 0;
     requires enc_len <= UINT_MAX;
     requires \valid_read(pEncoded + (0 .. enc_len - 1));
@@ -146,6 +165,12 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
 
     if (enc_len >= UINT_MAX)
         return 0;
+
+    /*
+     * Search for the last '-' delimiter, storing the number of
+     * probably-ASCII codepoints preceding the dash in basic_count, or 0 if
+     * the dash was not found.
+     */
     /*@ loop invariant 0 <= loop <= enc_len;
         loop invariant
             (basic_count == enc_len == 0) ||
@@ -162,12 +187,17 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
             (0 <= basic_count < enc_len);
     */
 
+    /* Copy leading ASCII codepoints from input to output buffer, if any. */
     if (basic_count > 0) {
         /*@ assert 0 <= basic_count < enc_len; */
 
         if (basic_count > max_out)
             return 0;
 
+        /*
+         * 1. Verify that all codepoints preceding the last dash are ASCII.
+         * 2. Copy those ASCII codepoints from input to output buffer.
+         */
         /*@ loop invariant 0 <= loop <= basic_count;
             loop invariant written_out == loop;
             loop assigns loop, written_out, pDecoded[0 .. basic_count - 1];
@@ -185,6 +215,7 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
     /*@ assert 0 <= processed_in <= enc_len; */
     /*@ assert (written_out == 0) || (written_out == basic_count); */
 
+    /* Insert each decoded non-ASCII codepoint into output buffer */
     /*@ loop invariant processed_in <= loop <= enc_len;
         loop invariant (written_out == 0) || (0 <= written_out <= max_out);
         loop assigns loop, i, bias, n, pDecoded[0 .. max_out - 1], written_out;
@@ -196,6 +227,7 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
         unsigned int k, t;
         int digit;
 
+        /* Decode a "delta" variable-length integer (i - oldi) */
         /*@ loop invariant processed_in <= loop <= enc_len;
             loop invariant w >= 1;
             loop invariant loop >= \at(loop, LoopEntry);
@@ -230,18 +262,23 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
             w = w * (base - t);
         }
 
+        /* Compute a new "bias" value, based on the last "delta" (i - oldi) */
         /*@ assert written_out + 1 <= UINT_MAX; */
         bias = adapt(i - oldi, written_out + 1, (oldi == 0));
+        /* Compute codepoint to insert: n */
         if (i / (written_out + 1) > maxint - n)
             return 0;
         n = n + i / (written_out + 1);
+        /* Compute index to insert at: i */
         i %= (written_out + 1);
         /*@ assert 0 <= i <= written_out; */
 
+        /* Fail if inserting a codepoint would overflow output capacity */
         if (written_out >= max_out)
             return 0;
         /*@ assert written_out < max_out; */
 
+        /* Insert codepoint n at index i, shifting old ones to the right */
         /*@ assert 0 <= i < max_out; */
         memmove(pDecoded + i + 1, pDecoded + i,
             (written_out - i) * sizeof(*pDecoded));
