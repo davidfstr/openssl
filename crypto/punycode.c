@@ -8,6 +8,7 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <openssl/e_os2.h>
 #include "crypto/punycode.h"
@@ -334,25 +335,16 @@ static int codepoint2utf8(unsigned char *out, unsigned long utf)
     }
 }
 
+static const char XN_PREFIX[] = "xn--";
+
 /*-
  * Return values:
  * 1 - ok
  * 0 - ok but buf was too short
  * -1 - bad string passed or other error
  */
-
-/*
- * A named constant instead of a "xn--" literal in the strncmp call below
- * (i.e. HAS_PREFIX): WP cannot discharge libc contract preconditions about
- * anonymous string literals (and ACSL annotations cannot even mention them),
- * but for a named const array the same obligations prove immediately. The
- * length is still sizeof-derived, preserving HAS_PREFIX's no-hand-counted-
- * length property.
- */
-static const char xn_prefix[] = "xn--";
-
 /*@ requires valid_read_string(in);
-    requires strlen(in) <= 9223372036854775807; // PTRDIFF_MAX: tmpptr - inptr
+    requires strlen(in) <= PTRDIFF_MAX; // needed for: tmpptr - inptr
     requires \valid(out + (0 .. outlen - 1));
 */
 int ossl_a2ulabel(const char *in, char *out, size_t outlen)
@@ -380,7 +372,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         const char *tmpptr = strchr(inptr, '.');
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
 
-        if (strncmp(inptr, xn_prefix, sizeof(xn_prefix) - 1) != 0) {
+        /* if (!HAS_PREFIX(inptr, "xn--")): Proofs have difficulty reasoning
+         * about string literals. So "xn--" is assigned to XN_PREFIX and the
+         * HAS_PREFIX macro is expanded manually. */
+        if (strncmp(inptr, XN_PREFIX, sizeof(XN_PREFIX) - 1) != 0) {
             if (!WPACKET_memcpy(&pkt, inptr, delta))
                 result = 0;
         } else {
@@ -391,6 +386,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
              * prefix, so the '.' (or NUL) that defined delta lies at or
              * beyond inptr + 4: the decode call below stays inside the label.
              */
+            /* TODO: Check whether any of the following asserts are unnecessary */
             /*@ assert stones: inptr[0] == 'x' && inptr[1] == 'n'
                     && inptr[2] == '-' && inptr[3] == '-'; */
             /*@ assert nodot: \forall integer j; 0 <= j < 4 ==> inptr[j] != '.'; */
