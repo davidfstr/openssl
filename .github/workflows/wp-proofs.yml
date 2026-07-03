@@ -113,33 +113,60 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Run WP proofs (committed cache --load, prebuilt image)
+      - name: Run WP proofs (committed cache --load / replay, prebuilt image)
         # For every proof, runs check-scope then verifies against the committed
-        # wp-cache/ in OFFLINE mode: no solver is ever run, so a green check is
-        # deterministic and cannot flake on solver timing. Exit non-zero on any
-        # unproven goal, scope drift, OR a cache miss -- a miss means the committed
-        # cache is stale for the current source or toolchain and must be
-        # regenerated locally with ./proof/run_proofs.pl --save. --no-build reuses
-        # the image built and cached by the step above.
+        # wp-cache/ in REPLAY mode: a cache HIT replays the recorded proof with no
+        # solver call (deterministic, cannot flake on solver timing), while a cache
+        # MISS still runs the solvers live -- so a change that shifts the WP goals
+        # is actually RE-PROVED here, not merely reported as "cache stale". The job
+        # therefore answers the question a contributor actually has ("does my change
+        # still prove?"), separately from the maintenance question ("is the cache
+        # fresh?"). It exits non-zero ONLY on a real regression -- an unproven goal
+        # or scope drift. A run that still proves but whose committed cache is out of
+        # date exits 0 and is surfaced as an advisory below, not a failure.
+        # --no-build reuses the image built and cached by the step above.
         run: |
           set -o pipefail
           ./proof/run_proofs.pl --load --no-build 2>&1 | tee "$RUNNER_TEMP/wp-proofs.log"
 
       - name: Record success (trust base travels with the result)
         if: success()
-        # The success banner printed by run_proofs.pl restates the trust base,
-        # caller obligations, and scope. Surface it in the run summary so the
-        # green check is never read as an unqualified "memory-safe, no caveats".
+        # run_proofs.pl exits 0 both when the committed cache is fresh AND when it
+        # is stale-but-still-proving (the solvers re-derived the missed goals live).
+        # Tell the two apart by the advisory banner in the log: a stale run stays
+        # green but raises a warning + a "please regenerate the cache" note, so a
+        # contributor sees "the proof still holds" rather than a red X telling them
+        # to run a tool. Either way the success banner restates the trust base,
+        # caller obligations, and scope, so the green check is never read as an
+        # unqualified "memory-safe, no caveats".
         run: |
-          {
-            echo '## WP proofs passed';
-            echo '';
-            echo 'Proved symbolically for all inputs, modulo the trust base below.';
-            echo '';
-            echo '```';
-            sed -n '/ALL PROOFS PASSED/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
-            echo '```';
-          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q 'COMMITTED CACHE STALE' "$RUNNER_TEMP/wp-proofs.log"; then
+            echo "::warning title=WP proof cache stale::The WP proofs still PASS, but proof/*/wp-cache/ is out of date, so the solvers had to re-derive the changed goals live (slower, small false-timeout risk). Regenerate with ./proof/run_proofs.pl --save and commit. This is NOT a proof failure."
+            {
+              echo '## :white_check_mark: WP proofs passed &mdash; :warning: committed cache stale';
+              echo '';
+              echo 'Every obligation was proved symbolically for all inputs &mdash; the';
+              echo 'proof HOLDS &mdash; but the committed proof cache no longer matches the';
+              echo 'current goals, so the solvers re-derived the changed goals live.';
+              echo 'Refresh it with `./proof/run_proofs.pl --save` and commit';
+              echo 'proof/*/wp-cache/.';
+              echo '';
+              echo '```';
+              sed -n '/ALL PROOFS PASSED/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
+              sed -n '/COMMITTED CACHE STALE/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
+              echo '```';
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo '## WP proofs passed';
+              echo '';
+              echo 'Proved symbolically for all inputs, modulo the trust base below.';
+              echo '';
+              echo '```';
+              sed -n '/ALL PROOFS PASSED/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
+              echo '```';
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Flag proof failure (non-blocking warning)
         if: failure()

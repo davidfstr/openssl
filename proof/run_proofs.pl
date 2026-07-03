@@ -22,17 +22,25 @@
 #               stale entries accumulate harmlessly. Determinism does not matter
 #               here, so this is the plain, no-argument default.
 #
-#   --load      USE COMMITTED ARTIFACTS -- verify against the committed cache only,
-#               never running a solver; a miss is a hard failure. This is the
-#               deterministic, fast path CI uses (it also detects a stale cache:
-#               any miss means the committed cache no longer matches the source or
-#               toolchain, so regenerate with --save).
+#   --load      VERIFY AGAINST COMMITTED ARTIFACTS (the CI path), two-tier so a
+#               green check answers the contributor's question ("does my change
+#               still prove?") apart from the maintenance one ("is the cache
+#               fresh?"). Tier 1 replays the committed cache OFFLINE (no solver): if
+#               it discharges every goal the cache is fresh AND the proof holds --
+#               fast, deterministic, the common case. Only on a miss does tier 2
+#               REPLAY re-derive the missed goals with the solvers: proving them
+#               means the cache was merely stale (PASS + advisory to run --save);
+#               failing to prove them is a real regression (FAIL). It never fails
+#               merely because the cache drifted. Both tiers gate on "Proved goals:
+#               N / M" -- the version-specific "[Cache]" line is never parsed.
 #
 #   --save      REGENERATE COMMITTED ARTIFACTS -- wipe and rebuild each proof's
 #               committed wp-cache/ from scratch, running solvers in a fixed,
 #               single-threaded order so the winning prover per goal (hence the
-#               cache) is identical on every machine. Must run in the pinned
-#               container so the cached prover versions match CI. Commit the result.
+#               cache) is identical on every machine, then verify the written cache
+#               stands alone (offline replay must hit every goal). Must run in the
+#               pinned container so the cached prover versions match CI. Commit the
+#               result.
 #
 # Also: --no-docker runs against a local Frama-C install instead of the container
 # (not allowed with --save, whose cache must match the pinned provers).
@@ -72,21 +80,23 @@ sub usage {
     print STDERR <<"EOF";
 usage: $0 [--load | --save] [--no-docker] [--no-build]
   (default)     prove locally: race solvers, cache to a scratch dir (fast)
-  --load        verify against the committed cache only; fail on any miss
-  --save        wipe + regenerate each proof's committed cache deterministically
+  --load        replay the committed cache (CI): re-prove on a miss; a stale
+                cache still passes with an advisory, only a real regression fails
+  --save        wipe + regenerate each proof's committed cache deterministically,
+                then verify it stands alone offline
   --no-docker   use a local Frama-C install instead of the container
   --no-build    reuse an already-present '$IMAGE' image instead of building it
                 (CI builds + caches the image via buildx before calling this)
 EOF
 }
 
-# WP cache profile per workflow: cache mode, which cache dir, and prover
-# parallelism. 'scratch' is a gitignored per-proof dir; 'committed' is the
-# checked-in wp-cache/. par=1 makes the winning prover per goal deterministic
-# (see run_wp.sh); par=8 races the portfolio for speed.
+# WP cache profile for the SINGLE-PASS workflows (prove, save); --load is
+# two-tier and sets its own modes inline in the loop below. 'scratch' is a
+# gitignored per-proof dir; 'committed' is the checked-in wp-cache/. par=1 makes
+# the winning prover per goal deterministic (see run_wp.sh) and is needed only by
+# --save, whose output cache must be reproducible.
 my %PROFILE = (
     prove => { cache => "update",  dir => "scratch",   par => 8 },
-    load  => { cache => "offline", dir => "committed", par => 1 },
     save  => { cache => "rebuild", dir => "committed", par => 1 },
 );
 
@@ -131,6 +141,7 @@ EOF
 # --- run each proof ---------------------------------------------------------
 my $prof = $PROFILE{$workflow};
 my @failures;
+my @stale;
 for my $runner (@runners) {
     my $name = basename(dirname($runner));           # e.g. "punycode"
 
@@ -146,11 +157,51 @@ for my $runner (@runners) {
     # entries from since-deleted goals linger in the committed artifact).
     wipe_committed_cache($name) if $workflow eq "save";
 
-    my %p = (cache => $prof->{cache},
-             dir   => cache_dir($name, $prof->{dir}),
-             par   => $prof->{par});
-    print "\n=== proof: $name  (prove: cache=$p{cache}, par=$p{par}) ===\n";
-    push @failures, "$name/prove" if run_cmd(proof_cmd($name, "prove", \%p)) != 0;
+    if ($workflow eq "load") {
+        # TWO-TIER, so a green check answers the contributor's question ("does my
+        # change still prove?") separately from the maintenance one ("is the cache
+        # fresh?"). Both tiers gate purely on "Proved goals: N / M"; neither parses
+        # the version-specific "[Cache]" line.
+        #
+        # Tier 1 -- OFFLINE: replay the committed cache with NO solver. If it proves
+        # every goal, the cache is fresh AND the proof holds: fast, deterministic,
+        # the common case. A miss leaves goals unproved (N < M), which is the ONLY
+        # thing that drops us to tier 2.
+        my %off = (cache => "offline", dir => cache_dir($name, "committed"), par => 1);
+        print "\n=== proof: $name  (load tier 1: offline, no solver) ===\n";
+        next if run_cmd(proof_cmd($name, "prove", \%off)) == 0;   # fresh + proved
+
+        # Tier 2 -- REPLAY: the committed cache missed, so re-derive the missed
+        # goals with the solvers. Proving them now means the cache was merely STALE
+        # (the proof still holds) -> advisory; failing to prove them is a real
+        # REGRESSION -> hard failure. par=8 bounds the wall-clock (nothing is
+        # written, so determinism is moot).
+        my %rep = (cache => "replay", dir => cache_dir($name, "committed"), par => 8);
+        print "\n=== proof: $name  (load tier 2: replay, re-prove on miss) ===\n";
+        if (run_cmd(proof_cmd($name, "prove", \%rep)) == 0) { push @stale, $name; }
+        else { push @failures, "$name/prove"; }
+    } else {
+        # prove / save: a single pass in the workflow's own cache mode.
+        my %p = (cache => $prof->{cache},
+                 dir   => cache_dir($name, $prof->{dir}),
+                 par   => $prof->{par});
+        print "\n=== proof: $name  (prove: cache=$p{cache}, par=$p{par}) ===\n";
+        push @failures, "$name/prove" if run_cmd(proof_cmd($name, "prove", \%p)) != 0;
+    }
+}
+
+# --save: the freshly written committed cache must stand ALONE -- discharge every
+# goal with no solver. Re-run each proof in offline mode (never calls a solver; a
+# miss is unproved, hence a hard failure) to prove the regeneration was complete.
+if ($workflow eq "save" && !@failures) {
+    for my $runner (@runners) {
+        my $name = basename(dirname($runner));
+        my %v = (cache => "offline",
+                 dir   => cache_dir($name, "committed"),
+                 par   => 1);
+        print "\n=== proof: $name  (verify committed cache stands alone: offline) ===\n";
+        push @failures, "$name/verify" if run_cmd(proof_cmd($name, "prove", \%v)) != 0;
+    }
 }
 
 # --- report -----------------------------------------------------------------
@@ -159,11 +210,13 @@ if (@failures) {
     exit 1;
 }
 if ($workflow eq "save") {
-    print "\nCommitted cache regenerated deterministically (ordered, par=1) in the\n"
-        . "pinned container. Review and commit the updated proof/*/wp-cache/.\n";
+    print "\nCommitted cache regenerated deterministically (ordered, par=1) and\n"
+        . "verified to stand alone (offline replay hit every goal) in the pinned\n"
+        . "container. Review and commit the updated proof/*/wp-cache/.\n";
     exit 0;
 }
 print_success(\@runners);
+print_stale(\@stale) if @stale;
 exit 0;
 
 # ---------------------------------------------------------------------------
@@ -329,15 +382,38 @@ drifted. Likely causes, most common first:
   2. A new function reachable from the proof entry point was added but not added
      to SCOPE_FCTS (a 'check-scope' MISSING failure) -- WP would otherwise ASSUME
      its contract without checking it. The failure message names the function.
-  3. STALE COMMITTED CACHE (--load only): the committed wp-cache/ no longer covers
-     the current source or toolchain, so an offline lookup missed. If the proof
-     itself still holds, regenerate and commit the cache:
-         ./proof/run_proofs.pl --save
-     (To first check the proof still holds at all, prove it locally with a bare
-     ./proof/run_proofs.pl, which races the solvers instead of using the cache.)
+
+Note: a merely STALE committed cache is NOT a failure -- under --load (replay) the
+solvers re-derive any missed goals live, so an out-of-date cache still PASSES with
+an advisory to regenerate it (./proof/run_proofs.pl --save). A failure here means
+the proof genuinely did not go through; regenerating the cache will not fix it.
 
 If you changed crypto/punycode.c and cannot work out how to repair the proof,
 the point of contact is $CONTACT -- reach out and I will help.
+============================================================================
+EOF
+}
+
+sub print_stale {
+    my ($stale) = @_;
+    print <<"EOF";
+
+============================================================================
+PROOFS PASSED, COMMITTED CACHE STALE (advisory): @$stale
+
+Every verification obligation was discharged -- the proof still HOLDS -- but the
+committed proof cache (proof/*/wp-cache/) no longer matches the current goals, so
+the solvers had to re-derive the missed goals live instead of replaying them from
+the cache. That is slower and, on a loaded runner, marginally more prone to a
+false timeout. It is NOT a proof failure.
+
+This usually means the proved source (e.g. crypto/punycode.c) or its ACSL
+annotations changed in a way that shifts the WP goals, without the cache being
+regenerated. To refresh it, run in the pinned container and commit the result:
+    ./proof/run_proofs.pl --save
+
+If you are a contributor who did not intend to touch the proof, the point of
+contact is $CONTACT.
 ============================================================================
 EOF
 }

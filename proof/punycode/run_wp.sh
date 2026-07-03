@@ -91,7 +91,9 @@
 #               list order, so the winning prover per goal is capability- (not
 #               timing-) determined and identical on every machine -- this is what
 #               makes a regenerated cache reproducible. run_proofs.pl uses 8 for
-#               fast local proving and 1 when regenerating the committed cache.
+#               local proving and for CI replay (no cache is written on either path,
+#               so determinism is moot), and 1 only when regenerating the committed
+#               cache (--save), where the winning prover must be reproducible.
 #
 #   -wp-cache <mode> / -wp-cache-dir <dir> (FRAMAC_WP_CACHE / FRAMAC_WP_CACHEDIR)
 #               Serve recorded proofs from a cache dir instead of rediscovering
@@ -174,12 +176,18 @@ TARGET_FCT="$(printf '%s' "$SCOPE_FCTS" | tr ' ' ',')"
 #             accumulate harmlessly and the committed cache is never touched.
 #   rebuild = always run solvers and write -- used by 'run_proofs.pl --save' (with
 #             FRAMAC_WP_PAR=1) to regenerate the COMMITTED wp-cache/ deterministically.
-#   offline = use cache but NEVER run a solver; a miss leaves the goal unproved,
-#             which the 'prove' gate turns into exit 1 -- used by
-#             'run_proofs.pl --load' to verify against the committed cache and to
-#             detect a stale cache (any miss => regenerate with --save).
-#   replay  = like offline but runs solvers on a miss (no write); friendliest for
-#             ad-hoc standalone checks, so it is this script's default.
+#   replay  = use cache; on a MISS run solvers but do NOT write. run_proofs.pl
+#             --load uses it as TIER 2 -- only after the offline tier below missed --
+#             to re-derive the changed goals live, and so distinguish a merely STALE
+#             cache (still proves => advisory) from a real REGRESSION (fails). Also
+#             this script's ad-hoc standalone default.
+#   offline = use cache but NEVER run a solver; a miss leaves the goal unproved, so
+#             the "Proved goals: N / M" gate reports N < M. run_proofs.pl --load
+#             uses it as TIER 1 (fast, deterministic, no solver): all goals proved
+#             means the cache is fresh AND the proof holds -- the common case. The
+#             "[Cache]" line is NOT parsed; N == M is the whole freshness signal.
+#             --save also uses offline to confirm a freshly written cache stands
+#             alone (covers every goal with no solver).
 CACHE_MODE="${FRAMAC_WP_CACHE:-replay}"
 CACHE_DIR="${FRAMAC_WP_CACHEDIR:-$SCRIPT_DIR/wp-cache}"
 PAR="${FRAMAC_WP_PAR:-8}"
@@ -198,7 +206,10 @@ case "$MODE" in
         # Frama-C exits 0 even when WP goals are left unproved, so its exit code
         # alone does NOT gate the proof. Capture the run, echo it, then enforce
         # completeness from the "Proved goals: N / M" summary: N < M (or a missing
-        # summary, e.g. an offline cache miss) is a hard failure.
+        # summary, e.g. an offline cache miss) is a hard failure. This is a single
+        # cache-mode PRIMITIVE; the freshness-vs-regression distinction (running an
+        # offline pass then, on a miss, a replay pass) is orchestrated by
+        # run_proofs.pl, so nothing here parses the version-specific "[Cache]" line.
         set +e
         out=$(frama-c "$@" "$SRC" 2>&1); rc=$?
         set -e
