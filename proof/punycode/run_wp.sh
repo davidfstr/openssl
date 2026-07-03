@@ -100,7 +100,7 @@
 #               them each run -- the single biggest robustness win against timeout
 #               flakiness. See the CACHE section for the modes.
 #
-# RESULT: 104 / 104 goals proved in scope. The only residue is the memmove_uint
+# RESULT: 160 / 160 goals proved in scope. The only residue is the memmove_uint
 # trust-base stub described above. Scope honesty: this covers
 # ossl_punycode_decode ONLY, not ossl_a2ulabel (the WPACKET-based caller that
 # actually held CVE-2022-3786); decode is the tractable island.

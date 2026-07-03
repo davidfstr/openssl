@@ -151,6 +151,9 @@ static ossl_inline int digit_decoded(const unsigned char a)
     requires *pout_length >= 0;
     requires *pout_length < UINT_MAX;
     requires \valid(pDecoded + (0 .. *pout_length - 1));
+    requires \separated(pout_length, pDecoded + (0 .. *pout_length - 1));
+    assigns *pout_length, pDecoded[0 .. *pout_length - 1];
+    ensures *pout_length <= \old(*pout_length);
 */
 int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
     unsigned int *pDecoded, unsigned int *pout_length)
