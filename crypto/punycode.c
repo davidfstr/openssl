@@ -297,6 +297,10 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
  * return number of bytes on success, 0 on failure
  * (also produces U+FFFD, which uses 3 bytes on failure)
  */
+/*@ requires \valid(out + (0 .. 4));
+    assigns out[0 .. 4];
+    ensures 0 <= \result <= 4;
+*/
 static int codepoint2utf8(unsigned char *out, unsigned long utf)
 {
     if (utf <= 0x7F) {
