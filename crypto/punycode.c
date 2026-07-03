@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <openssl/e_os2.h>
 #include "crypto/punycode.h"
-#include "internal/common.h" /* for HAS_PREFIX */
+#include "internal/common.h" /* for ossl_assert */
 #include "internal/packet.h" /* for WPACKET */
 
 static const unsigned int base = 36;
@@ -341,6 +341,20 @@ static int codepoint2utf8(unsigned char *out, unsigned long utf)
  * -1 - bad string passed or other error
  */
 
+/*
+ * A named constant instead of a "xn--" literal in the strncmp call below
+ * (i.e. HAS_PREFIX): WP cannot discharge libc contract preconditions about
+ * anonymous string literals (and ACSL annotations cannot even mention them),
+ * but for a named const array the same obligations prove immediately. The
+ * length is still sizeof-derived, preserving HAS_PREFIX's no-hand-counted-
+ * length property.
+ */
+static const char xn_prefix[] = "xn--";
+
+/*@ requires valid_read_string(in);
+    requires strlen(in) <= 9223372036854775807; // PTRDIFF_MAX: tmpptr - inptr
+    requires \valid(out + (0 .. outlen - 1));
+*/
 int ossl_a2ulabel(const char *in, char *out, size_t outlen)
 {
     /*-
@@ -366,11 +380,24 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         const char *tmpptr = strchr(inptr, '.');
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
 
-        if (!HAS_PREFIX(inptr, "xn--")) {
+        if (strncmp(inptr, xn_prefix, sizeof(xn_prefix) - 1) != 0) {
             if (!WPACKET_memcpy(&pkt, inptr, delta))
                 result = 0;
         } else {
             unsigned int bufsize = LABEL_BUF_SIZE;
+
+            /*
+             * The label starts with "xn--", and '.' does not occur in that
+             * prefix, so the '.' (or NUL) that defined delta lies at or
+             * beyond inptr + 4: the decode call below stays inside the label.
+             */
+            /*@ assert stones: inptr[0] == 'x' && inptr[1] == 'n'
+                    && inptr[2] == '-' && inptr[3] == '-'; */
+            /*@ assert nodot: \forall integer j; 0 <= j < 4 ==> inptr[j] != '.'; */
+            /*@ assert len4: strlen(inptr) >= 4; */
+            /*@ assert dot_at: tmpptr != \null ==> *tmpptr == '.'; */
+            /*@ assert far: tmpptr != \null ==> tmpptr - inptr >= 4; */
+            /*@ assert delta4: delta >= 4; */
 
             if (ossl_punycode_decode(inptr + 4, delta - 4, buf, &bufsize) <= 0) {
                 result = -1;
