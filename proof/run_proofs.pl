@@ -51,10 +51,12 @@ my $IMAGE     = "openssl-proof-tools";       # locally-built pinned toolchain
 my $CONTACT   = "David Foster (\@davidfstr, david AT dafoster DOT net)";
 
 # --- options ---------------------------------------------------------------
-my $use_docker = 1;
-my $workflow   = "prove";        # prove (default) | load | save
+my $use_docker  = 1;
+my $build_image = 1;
+my $workflow    = "prove";       # prove (default) | load | save
 for my $arg (@ARGV) {
     if    ($arg eq "--no-docker") { $use_docker = 0; }
+    elsif ($arg eq "--no-build")  { $build_image = 0; }
     elsif ($arg eq "--load")      { $workflow = "load"; }
     elsif ($arg eq "--save")      { $workflow = "save"; }
     elsif ($arg eq "-h" || $arg eq "--help") { usage(); exit 0; }
@@ -68,11 +70,13 @@ if ($workflow eq "save" && !$use_docker) {
 
 sub usage {
     print STDERR <<"EOF";
-usage: $0 [--load | --save] [--no-docker]
+usage: $0 [--load | --save] [--no-docker] [--no-build]
   (default)     prove locally: race solvers, cache to a scratch dir (fast)
   --load        verify against the committed cache only; fail on any miss
   --save        wipe + regenerate each proof's committed cache deterministically
   --no-docker   use a local Frama-C install instead of the container
+  --no-build    reuse an already-present '$IMAGE' image instead of building it
+                (CI builds + caches the image via buildx before calling this)
 EOF
 }
 
@@ -93,8 +97,13 @@ die "$0: no proofs found under $PROOF_DIR/*/run_wp.sh\n" unless @runners;
 # --- make sure the generated headers the proof parses are present -----------
 ensure_generated_headers();
 
-# --- build the pinned toolchain image (fast once layers are cached) ---------
-if ($use_docker) {
+# --- obtain the pinned toolchain image --------------------------------------
+# Default: build it here (fast once layers are cached locally). Under --no-build
+# the image is expected to already exist -- CI builds and layer-caches it with
+# buildx (docker/build-push-action, cache-from/to type=gha) before calling us, so
+# the slow base-image pull + solver install happens once per cache lifetime, not
+# every run.
+if ($use_docker && $build_image) {
     print "=== building pinned proof toolchain ($IMAGE) ===\n";
     my $rc = run_cmd("docker", "build", "-t", $IMAGE, "$PROOF_DIR/docker");
     if ($rc != 0) {
@@ -103,6 +112,17 @@ if ($use_docker) {
 FAILED to build the proof toolchain image. Docker must be installed and
 running. To run without Docker against a local Frama-C 31 + Alt-Ergo/Z3/cvc5
 install, use:  $0 --no-docker
+EOF
+        exit 1;
+    }
+} elsif ($use_docker) {   # --no-build: image must already be present
+    print "=== using pre-built proof toolchain ($IMAGE) ===\n";
+    if (system("docker image inspect $IMAGE >/dev/null 2>&1") != 0) {
+        print STDERR <<"EOF";
+
+--no-build was given but the image '$IMAGE' is not present. In CI the workflow
+builds and caches this image (docker/build-push-action) before invoking
+run_proofs.pl. Locally, drop --no-build so run_proofs.pl builds it itself.
 EOF
         exit 1;
     }

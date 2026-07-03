@@ -59,17 +59,71 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run WP proofs (pinned Docker toolchain, committed cache --load)
-        # --load builds the pinned image (base image pulled anonymously; no
-        # registry credentials needed) and, for every proof, runs check-scope then
-        # verifies against the committed wp-cache/ in OFFLINE mode: no solver is
-        # ever run, so a green check is deterministic and cannot flake on solver
-        # timing. Exit non-zero on any unproven goal, scope drift, OR a cache miss
-        # -- a miss means the committed cache is stale for the current source or
-        # toolchain and must be regenerated locally with ./proof/run_proofs.pl --save.
+      - name: Enable containerd image store (fast buildx --load)
+        # Without this, `buildx build --load` of our ~2GB image spent 130-180s per
+        # run in "importing to docker": the default image store makes the daemon
+        # re-import the loaded image tarball. The containerd image store lets the
+        # daemon ingest that image into its shared content store as a near-instant
+        # metadata op ("importing to docker" is now 0s). (It does NOT remove the
+        # separate export/send cost on the builder side -- see the build step.)
+        run: |
+          set -eux
+          sudo mkdir -p /etc/docker
+          echo '{"features":{"containerd-snapshotter":true}}' \
+            | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format 'image store driver: {{json .DriverStatus}}'
+
+      - name: Set up Docker Buildx
+        # Provides the buildkit builder that can export/import the build cache to
+        # the GitHub Actions cache (cache-to/from type=gha) below.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build pinned proof toolchain image (GHA layer cache)
+        # The slow part of a run is building this image: the large frama-c base is
+        # pulled from Docker Hub (throttled, anonymous) and the Z3/cvc5 install
+        # RUN steps execute. We persist the layers in the GitHub Actions cache, so
+        # after the first run buildx reconstructs the image from GHA's in-network
+        # store and skips the RUN steps entirely. load: true puts the tagged image
+        # into the docker daemon so run_proofs.pl --no-build can `docker run` it.
+        # The daily cron keeps this cache warm (GHA evicts caches idle for 7 days).
+        #
+        # COST / KNOWN LIMITATION: this step steady-states around 1m50s, almost all
+        # of it (~1m40s) spent in "#9 exporting to oci image format / sending
+        # tarball". cache-to type=gha REQUIRES the docker-container buildx driver,
+        # which is a separate buildkit instance that does NOT share the daemon's
+        # image store -- so load: true must serialize the whole ~2GB image to an OCI
+        # tarball and stream it to the daemon every run. (The default "docker"
+        # driver loads for free via the containerd store above, but cannot export a
+        # type=gha cache -- you can't have both from one builder.)
+        #
+        # This ~1m10s could be eliminated by publishing the built image to GHCR once
+        # and having warm runs `docker pull` it straight into the containerd store
+        # (skipping both the build and the tarball send, ~40s total). That was
+        # judged not worth it here: it publishes the toolchain image to an external
+        # namespace, needs packages:write + a registry login, and adds
+        # pull-or-build-on-miss logic -- too much machinery for a non-blocking check
+        # that is already down from 3m30s to under 2m.
+        uses: docker/build-push-action@v6
+        with:
+          context: proof/docker
+          load: true
+          tags: openssl-proof-tools
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run WP proofs (committed cache --load, prebuilt image)
+        # For every proof, runs check-scope then verifies against the committed
+        # wp-cache/ in OFFLINE mode: no solver is ever run, so a green check is
+        # deterministic and cannot flake on solver timing. Exit non-zero on any
+        # unproven goal, scope drift, OR a cache miss -- a miss means the committed
+        # cache is stale for the current source or toolchain and must be
+        # regenerated locally with ./proof/run_proofs.pl --save. --no-build reuses
+        # the image built and cached by the step above.
         run: |
           set -o pipefail
-          ./proof/run_proofs.pl --load 2>&1 | tee "$RUNNER_TEMP/wp-proofs.log"
+          ./proof/run_proofs.pl --load --no-build 2>&1 | tee "$RUNNER_TEMP/wp-proofs.log"
 
       - name: Record success (trust base travels with the result)
         if: success()
