@@ -43,6 +43,11 @@
 #ifdef NDEBUG
 #define ossl_assert(x) ossl_likely((x) != 0)
 #else
+/*@ terminates \true;
+    assigns \nothing;
+    exits !expr && \exit_status == 3;
+    ensures expr && \result;
+*/
 __owur static ossl_inline int ossl_assert_int(int expr, const char *exprstr,
     const char *file, int line)
 {
