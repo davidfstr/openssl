@@ -342,8 +342,6 @@ static int codepoint2utf8(unsigned char *out, unsigned long utf)
     }
 }
 
-static const char XN_PREFIX[] = "xn--";
-
 /*-
  * Return values:
  * 1 - ok
@@ -383,9 +381,9 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
 
         /* if (!HAS_PREFIX(inptr, "xn--")): Proofs have difficulty reasoning
-         * about string literals. So "xn--" is assigned to XN_PREFIX and the
-         * HAS_PREFIX macro is expanded manually. */
-        if (strncmp(inptr, XN_PREFIX, sizeof(XN_PREFIX) - 1) != 0) {
+         * about string literals. This prefix is short enough that unrolling
+         * is legible to both humans and provers. */
+        if (!(inptr[0] == 'x' && inptr[1] == 'n' && inptr[2] == '-' && inptr[3] == '-')) {
             if (!WPACKET_memcpy(&pkt, inptr, delta))
                 result = 0;
         } else {
@@ -397,8 +395,6 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
              * beyond inptr + 4: the decode call below stays inside the label.
              */
             /* TODO: Check whether any of the following asserts are unnecessary */
-            /*@ assert stones: inptr[0] == 'x' && inptr[1] == 'n'
-                    && inptr[2] == '-' && inptr[3] == '-'; */
             /*@ assert nodot: \forall integer j; 0 <= j < 4 ==> inptr[j] != '.'; */
             /*@ assert len4: strlen(inptr) >= 4; */
             /*@ assert dot_at: tmpptr != \null ==> *tmpptr == '.'; */
