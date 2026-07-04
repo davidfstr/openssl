@@ -372,10 +372,15 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
     if (!ossl_assert(out != NULL))
         return -1;
 
-    if (!WPACKET_init_static_len(&pkt, (unsigned char *)out, outlen, 0))
+    /* Isolate cast to simplify downstream proofs */
+    unsigned char *out2 = (unsigned char *)out;
+    if (!WPACKET_init_static_len(&pkt, out2, outlen, 0))
         return -1;
 
-    /*@ loop invariant inptr_str: valid_read_string(inptr);
+    /*@ loop invariant pkt_inv: wpacket_static_inv(&pkt);
+        loop invariant pkt_buf: pkt.staticbuf == out2;
+        loop invariant pkt_max: pkt.maxsize == outlen;
+        loop invariant inptr_str: valid_read_string(inptr);
         loop invariant inptr_len: strlen(inptr) <= PTRDIFF_MAX;
     */
     while (1) {
@@ -411,6 +416,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
                 goto end;
             }
 
+            /*@ loop invariant pkt_inv2: wpacket_static_inv(&pkt);
+                loop invariant pkt_buf2: pkt.staticbuf == out2;
+                loop invariant pkt_max2: pkt.maxsize == outlen;
+            */
             for (i = 0; i < bufsize; i++) {
                 unsigned char seed[6];
                 size_t utfsize = codepoint2utf8(seed, buf[i]);
