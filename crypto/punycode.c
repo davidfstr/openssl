@@ -353,6 +353,7 @@ static const char XN_PREFIX[] = "xn--";
 /*@ requires valid_read_string(in);
     requires strlen(in) <= PTRDIFF_MAX; // needed for: tmpptr - inptr
     requires \valid(out + (0 .. outlen - 1));
+    requires \separated(in + (0 .. strlen(in)), out + (0 .. outlen - 1));
 */
 int ossl_a2ulabel(const char *in, char *out, size_t outlen)
 {
