@@ -379,6 +379,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
     while (1) {
         const char *tmpptr = strchr(inptr, '.');
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
+        /*@ assert far_top: tmpptr != \null ==> tmpptr - inptr <= PTRDIFF_MAX; */
 
         /* if (!HAS_PREFIX(inptr, "xn--")): Proofs have difficulty reasoning
          * about string literals. This prefix is short enough that unrolling
@@ -398,7 +399,9 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
             /*@ assert nodot: \forall integer j; 0 <= j < 4 ==> inptr[j] != '.'; */
             /*@ assert len4: strlen(inptr) >= 4; */
             /*@ assert dot_at: tmpptr != \null ==> *tmpptr == '.'; */
-            /*@ assert far: tmpptr != \null ==> tmpptr - inptr >= 4; */
+            /*@ assert far:  tmpptr != \null ==> tmpptr - inptr >= 4; */
+            /*@ assert far2: tmpptr != \null ==> tmpptr - inptr <= PTRDIFF_MAX; */
+            /*@ assert far3: tmpptr != \null ==> (size_t)(tmpptr - inptr) >= 4; */
             /*@ assert delta4: delta >= 4; */
 
             if (ossl_punycode_decode(inptr + 4, delta - 4, buf, &bufsize) <= 0) {
