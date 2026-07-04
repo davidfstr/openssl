@@ -377,6 +377,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
     if (!WPACKET_init_static_len(&pkt, (unsigned char *)out, outlen, 0))
         return -1;
 
+    /*@ loop invariant inptr_str: valid_read_string(inptr); */
     while (1) {
         const char *tmpptr = strchr(inptr, '.');
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
@@ -429,6 +430,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         if (!WPACKET_put_bytes_u8(&pkt, '.'))
             result = 0;
 
+        /*@ assert next_str: valid_read_string(tmpptr + 1); */
         inptr = tmpptr + 1;
     }
 
