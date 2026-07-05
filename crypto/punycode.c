@@ -394,7 +394,6 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
     while (1) {
         const char *tmpptr = strchr(inptr, '.');
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
-        /*@ assert far_top: tmpptr != \null ==> tmpptr - inptr <= PTRDIFF_MAX; */
 
         /* if (!HAS_PREFIX(inptr, "xn--")): Proofs have difficulty reasoning
          * about string literals. This prefix is short enough that unrolling
@@ -417,19 +416,18 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
             unsigned int bufsize = LABEL_BUF_SIZE;
 
             /*
-             * The label starts with "xn--", and '.' does not occur in that
-             * prefix, so the '.' (or NUL) that defined delta lies at or
-             * beyond inptr + 4: the decode call below stays inside the label.
+             * The label starts with "xn--". Neither '.' nor NUL occurs in that
+             * prefix. Thus the decode call, reading after the prefix, still
+             * reads from a substring of in up to the next '.' or NUL.
              */
-            /* TODO: Check whether any of the following asserts are unnecessary */
-            /*@ assert nodot: \forall integer j; 0 <= j < 4 ==> inptr[j] != '.'; */
-            /*@ assert len4: strlen(inptr) >= 4; */
-            /*@ assert dot_at: tmpptr != \null ==> *tmpptr == '.'; */
-            /*@ assert far:  tmpptr != \null ==> tmpptr - inptr >= 4; */
-            /*@ assert far2: tmpptr != \null ==> tmpptr - inptr <= PTRDIFF_MAX; */
-            /*@ assert far3: tmpptr != \null ==> (size_t)(tmpptr - inptr) >= 4; */
-            /*@ assert delta4: delta >= 4; */
-
+            /*@ assert dot_at_tmpptr: tmpptr != \null ==> *tmpptr == '.'; */
+            /*@ assert dot_far:  tmpptr != \null ==> tmpptr - inptr >= 4; */
+            /*@ assert dot_far2: tmpptr != \null ==> tmpptr - inptr <= PTRDIFF_MAX; */
+            /*@ assert dot_far3: tmpptr != \null ==> (size_t)(tmpptr - inptr) >= 4; */
+            /*@ assert dot_far4: tmpptr != \null ==> delta >= 4; */
+            /*@ assert nul_far:              strlen(inptr) >= 4; */
+            /*@ assert nul_far2: tmpptr == \null ==> delta >= 4; */
+            /*@ assert dot_or_nul_far:               delta >= 4; */
             if (ossl_punycode_decode(inptr + 4, delta - 4, buf, &bufsize) <= 0) {
                 result = -1;
                 goto end;
