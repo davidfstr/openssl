@@ -75,9 +75,11 @@ int WPACKET_init_static_len(WPACKET *pkt, unsigned char *buf, size_t len,
 /*@ requires wpacket_static_inv(pkt);
     requires \valid_read((unsigned char *)src + (0 .. len - 1));
     requires \separated((unsigned char *)src + (0 .. len - 1),
-        pkt->staticbuf + (pkt->written .. pkt->written + len - 1));
+        pkt->staticbuf
+            + (pkt->written .. \min(pkt->written + len, pkt->maxsize) - 1));
     assigns pkt->curr, pkt->written,
-        pkt->staticbuf[pkt->written .. pkt->written + len - 1];
+        pkt->staticbuf
+            [pkt->written .. \min(pkt->written + len, pkt->maxsize) - 1];
     ensures wpacket_static_inv(pkt);
     ensures pkt->staticbuf == \old(pkt->staticbuf);
     ensures pkt->maxsize == \old(pkt->maxsize);
@@ -90,7 +92,8 @@ int WPACKET_memcpy(WPACKET *pkt, const void *src, size_t len);
 /* Only the WPACKET_put_bytes_u8 (bytes == 1) instantiation is in scope. */
 /*@ requires wpacket_static_inv(pkt);
     assigns pkt->curr, pkt->written,
-        pkt->staticbuf[pkt->written .. pkt->written + bytes - 1];
+        pkt->staticbuf
+            [pkt->written .. \min(pkt->written + bytes, pkt->maxsize) - 1];
     ensures wpacket_static_inv(pkt);
     ensures pkt->staticbuf == \old(pkt->staticbuf);
     ensures pkt->maxsize == \old(pkt->maxsize);
