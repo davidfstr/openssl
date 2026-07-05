@@ -108,8 +108,6 @@ static ossl_inline int digit_decoded(const unsigned char a)
  * - "mxacd" -> U"αβγ"          (all non-ASCII codepoints)
  *
  * Special preconditions:
- * - The caller MUST ensure (enc_len <= UINT_MAX) so that this function
- *   terminates.
  * - The caller MUST ensure (*pout_length < UINT_MAX) to avoid a divide-by-zero.
  */
 /*-
@@ -145,7 +143,6 @@ static ossl_inline int digit_decoded(const unsigned char a)
  *  end
  */
 /*@ requires enc_len >= 0;
-    requires enc_len <= UINT_MAX;
     requires \valid_read(pEncoded + (0 .. enc_len - 1));
     requires \valid(pout_length);
     requires *pout_length >= 0;
