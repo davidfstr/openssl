@@ -385,6 +385,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         loop invariant pkt_max: pkt.maxsize == outlen;
         loop invariant inptr_str: valid_read_string(inptr);
         loop invariant inptr_len: strlen(inptr) <= PTRDIFF_MAX;
+        loop invariant inptr_lo: in <= inptr;
+        loop invariant inptr_hi: inptr <= in + strlen(in);
+        loop invariant inptr_in_end_eq:
+            inptr + strlen(inptr) == in + strlen(in);
         loop assigns inptr, result, i,
             buf[0 .. LABEL_BUF_SIZE - 1],
             pkt.curr, pkt.written,
@@ -399,6 +403,22 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
          * about string literals. This prefix is short enough that unrolling
          * is legible to both humans and provers. */
         if (!(inptr[0] == 'x' && inptr[1] == 'n' && inptr[2] == '-' && inptr[3] == '-')) {
+            /*@ assert sep_in_out_pre1: \separated(
+                    in + (0 .. strlen(in)),
+                    out + (0 .. outlen - 1)); */
+            /*@ assert sep_in_out_pre2: \separated(
+                    in + (0 .. strlen(in)),
+                    out2 + (0 .. outlen - 1)); */
+
+            /*@ assert sep_src3: \separated(
+                    inptr + (0 .. delta - 1),
+                    out2 + (0 .. outlen - 1)); */
+            /*@ assert sep_src2: \separated(
+                    (unsigned char *)inptr + (0 .. delta - 1),
+                    out2 + (0 .. outlen - 1)); */
+            /*@ assert sep_src1: \separated(
+                    (unsigned char *)inptr + (0 .. delta - 1),
+                    out2 + (pkt.written .. \min(pkt.written + delta, outlen) - 1)); */
             if (!WPACKET_memcpy(&pkt, inptr, delta))
                 result = 0;
         } else {
@@ -455,6 +475,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
 
         /*@ assert next_str: valid_read_string(tmpptr + 1); */
         /*@ assert next_len: strlen(tmpptr + 1) <= PTRDIFF_MAX; */
+        /*@ assert next_suffix: (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in); */
         inptr = tmpptr + 1;
     }
 
