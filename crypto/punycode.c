@@ -377,7 +377,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
     if (!WPACKET_init_static_len(&pkt, out2, outlen, 0))
         return -1;
 
-    /*@ loop invariant pkt_inv: wpacket_static_inv(&pkt);
+    /*@ loop invariant sep_in_out1: \separated(
+            in + (0 .. strlen(in)),
+            out + (0 .. outlen - 1));
+        loop invariant pkt_inv: wpacket_static_inv(&pkt);
         loop invariant pkt_buf: pkt.staticbuf == out2;
         loop invariant pkt_max: pkt.maxsize == outlen;
         loop invariant inptr_str: valid_read_string(inptr);
@@ -420,7 +423,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
                 goto end;
             }
 
-            /*@ loop invariant pkt_inv2: wpacket_static_inv(&pkt);
+            /*@ loop invariant sep_in_out2: \separated(
+                    in + (0 .. strlen(in)),
+                    out + (0 .. outlen - 1));
+                loop invariant pkt_inv2: wpacket_static_inv(&pkt);
                 loop invariant pkt_buf2: pkt.staticbuf == out2;
                 loop invariant pkt_max2: pkt.maxsize == outlen;
                 loop assigns result, i,
