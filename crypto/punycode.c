@@ -382,6 +382,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         loop invariant pkt_max: pkt.maxsize == outlen;
         loop invariant inptr_str: valid_read_string(inptr);
         loop invariant inptr_len: strlen(inptr) <= PTRDIFF_MAX;
+        loop assigns inptr, result, i,
+            buf[0 .. LABEL_BUF_SIZE - 1],
+            pkt.curr, pkt.written,
+            out[0 .. outlen - 1];
     */
     while (1) {
         const char *tmpptr = strchr(inptr, '.');
@@ -419,6 +423,9 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
             /*@ loop invariant pkt_inv2: wpacket_static_inv(&pkt);
                 loop invariant pkt_buf2: pkt.staticbuf == out2;
                 loop invariant pkt_max2: pkt.maxsize == outlen;
+                loop assigns result, i,
+                    pkt.curr, pkt.written,
+                    out[0 .. outlen - 1];
             */
             for (i = 0; i < bufsize; i++) {
                 unsigned char seed[6];
