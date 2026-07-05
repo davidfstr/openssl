@@ -377,7 +377,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
     if (!WPACKET_init_static_len(&pkt, out2, outlen, 0))
         return -1;
 
-    /*@ loop invariant sep_in_out1: \separated(
+    /*@ loop invariant sep_in_out: \separated(
             in + (0 .. strlen(in)),
             out + (0 .. outlen - 1));
         loop invariant pkt_inv: wpacket_static_inv(&pkt);
@@ -403,22 +403,17 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
          * about string literals. This prefix is short enough that unrolling
          * is legible to both humans and provers. */
         if (!(inptr[0] == 'x' && inptr[1] == 'n' && inptr[2] == '-' && inptr[3] == '-')) {
-            /*@ assert sep_in_out_pre1: \separated(
-                    in + (0 .. strlen(in)),
-                    out + (0 .. outlen - 1)); */
-            /*@ assert sep_in_out_pre2: \separated(
+            /* Help provers derive:
+             * (in & out separated) ==> (in substring & out separated) */
+            /*@ assert sep_in_out_cast: \separated(
                     in + (0 .. strlen(in)),
                     out2 + (0 .. outlen - 1)); */
-
-            /*@ assert sep_src3: \separated(
+            /*@ assert sep_in_substr_out: \separated(
                     inptr + (0 .. delta - 1),
                     out2 + (0 .. outlen - 1)); */
-            /*@ assert sep_src2: \separated(
+            /*@ assert sep_in_substr_out_cast: \separated(
                     (unsigned char *)inptr + (0 .. delta - 1),
                     out2 + (0 .. outlen - 1)); */
-            /*@ assert sep_src1: \separated(
-                    (unsigned char *)inptr + (0 .. delta - 1),
-                    out2 + (pkt.written .. \min(pkt.written + delta, outlen) - 1)); */
             if (!WPACKET_memcpy(&pkt, inptr, delta))
                 result = 0;
         } else {
@@ -473,10 +468,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         if (!WPACKET_put_bytes_u8(&pkt, '.'))
             result = 0;
 
+        inptr = tmpptr + 1;
         /*@ assert next_str: valid_read_string(tmpptr + 1); */
         /*@ assert next_len: strlen(tmpptr + 1) <= PTRDIFF_MAX; */
-        /*@ assert next_suffix: (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in); */
-        inptr = tmpptr + 1;
+        /*@ assert next_end_eq: (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in); */
     }
 
     if (!WPACKET_put_bytes_u8(&pkt, '\0'))
