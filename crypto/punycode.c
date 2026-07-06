@@ -454,10 +454,12 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
                 loop invariant pkt_inv2: wpacket_static_inv(&pkt);
                 loop invariant pkt_buf2: pkt.staticbuf == out2;
                 loop invariant pkt_max2: pkt.maxsize == outlen;
-                loop invariant when_dot_next_str:
-                    tmpptr != \null ==> valid_read_string(tmpptr + 1);
-                loop invariant when_dot_next_len2:
-                    tmpptr != \null ==> strlen(tmpptr + 1) <= PTRDIFF_MAX;
+                loop invariant when_dot_next_str: tmpptr != \null ==>
+                    valid_read_string(tmpptr + 1);
+                loop invariant when_dot_next_len2: tmpptr != \null ==>
+                    strlen(tmpptr + 1) <= PTRDIFF_MAX;
+                loop invariant when_dot_next_end_eq: tmpptr != \null ==>
+                    (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in);
                 loop assigns result, i,
                     pkt.curr, pkt.written,
                     out[0 .. outlen - 1];
