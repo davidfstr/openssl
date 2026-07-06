@@ -390,6 +390,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
             buf[0 .. LABEL_BUF_SIZE - 1],
             pkt.curr, pkt.written,
             out[0 .. outlen - 1];
+        loop variant in + strlen(in) - inptr;
     */
     while (1) {
         const char *tmpptr = strchr(inptr, '.');
@@ -463,6 +464,7 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
                 loop assigns result, i,
                     pkt.curr, pkt.written,
                     out[0 .. outlen - 1];
+                loop variant bufsize - i;
             */
             for (i = 0; i < bufsize; i++) {
                 unsigned char seed[6];
@@ -484,10 +486,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         if (!WPACKET_put_bytes_u8(&pkt, '.'))
             result = 0;
 
-        inptr = tmpptr + 1;
         /*@ assert next_str: valid_read_string(tmpptr + 1); */
         /*@ assert next_len: strlen(tmpptr + 1) <= PTRDIFF_MAX; */
         /*@ assert next_end_eq: (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in); */
+        inptr = tmpptr + 1;
     }
 
     if (!WPACKET_put_bytes_u8(&pkt, '\0'))
