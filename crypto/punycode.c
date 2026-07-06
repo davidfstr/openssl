@@ -395,6 +395,21 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         const char *tmpptr = strchr(inptr, '.');
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
 
+        /* Help provers derive:
+         * (found a '.') ==> (len of suffix after '.' <= strlen(inptr)) */
+        /*@ assert delta_le_inptr_len: tmpptr != \null ==>
+                0 <= tmpptr - inptr <= strlen(inptr); */
+        /*@ // Match strlen_shift axiom's strlen(s + i) shape
+            // so that WP recognizes it. Do not simplify.
+            assert tmpptr_len:         tmpptr != \null ==>
+                strlen(inptr + (tmpptr - inptr)) == strlen(inptr) - (tmpptr - inptr); */
+        /*@ assert tmpptr_len2:        tmpptr != \null ==>
+                strlen(tmpptr) == strlen(inptr) - (tmpptr - inptr); */
+        /*@ assert tmpptr_len3:        tmpptr != \null ==>
+                strlen(tmpptr) <= strlen(inptr); */
+        /*@ assert when_dot_next_len:  tmpptr != \null ==>
+                strlen(tmpptr + 1) <= PTRDIFF_MAX; */
+
         /* if (!HAS_PREFIX(inptr, "xn--")): Proofs have difficulty reasoning
          * about string literals. This prefix is short enough that unrolling
          * is legible to both humans and provers. */
@@ -439,8 +454,10 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
                 loop invariant pkt_inv2: wpacket_static_inv(&pkt);
                 loop invariant pkt_buf2: pkt.staticbuf == out2;
                 loop invariant pkt_max2: pkt.maxsize == outlen;
-                loop invariant tmpptr_str:
+                loop invariant when_dot_next_str:
                     tmpptr != \null ==> valid_read_string(tmpptr + 1);
+                loop invariant when_dot_next_len2:
+                    tmpptr != \null ==> strlen(tmpptr + 1) <= PTRDIFF_MAX;
                 loop assigns result, i,
                     pkt.curr, pkt.written,
                     out[0 .. outlen - 1];
