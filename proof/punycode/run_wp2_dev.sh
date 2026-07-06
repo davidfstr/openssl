@@ -33,8 +33,11 @@ case "$MODE" in
     CSV="$(mktemp)"; TAB="$(printf '\t')"
     frama-c "$@" "$REPO/crypto/punycode.c" -then -report-csv "$CSV" >/dev/null 2>&1
     awk -F"$TAB" 'NR>1 && $6!="Valid" && $3!="" {
-        n=split($2,p,"/"); printf "%-5s [%s] %s: %s\n", $3, $6, $5, $7 }' "$CSV" \
-      | sort -k1,1n
+             n = split($2, p, "/"); f = p[n];
+             printf "%s\t%s\t[%s] %s: %s\n", f, $3, $6, $5, $7
+          }' "$CSV" \
+      | sort -t"$TAB" -k1,1 -k2,2n \
+      | awk -F"$TAB" '{ printf "%-12s:%-5s %s\n", $1, $2, $3 }'
     rm -f "$CSV"
     ;;
 esac
