@@ -4,9 +4,10 @@
 #
 # Uses an "update" cache so dev iterations are fast and never
 # touch the committed proof/punycode/wp-cache. Flags carried from the spikes:
-#   -wp-literals       string-literal contents modeled concretely (entry2 spike)
 #   -wp-model Typed+cast   char* <-> unsigned char* casts (loop 4)
 #   -include wpacket_spec.h   trust-base WPACKET contracts (loop 4)
+# (-wp-literals was dropped once the "xn--" prefix test was unrolled by hand:
+#  no string literal remains in scope, so concrete literal modeling is moot.)
 set -eu
 
 REPO="$HOME/Projects/openssl"
@@ -19,7 +20,6 @@ mkdir -p "$CACHE"
 
 set --
 set -- "$@" -cpp-extra-args="-I$REPO/include -include $SPEC"
-set -- "$@" -wp-literals
 set -- "$@" -instantiate -wp -wp-rte -wp-model Typed+cast
 set -- "$@" -wp-prover alt-ergo,z3,cvc5 -wp-timeout 10 -wp-par 8
 set -- "$@" -wp-cache update -wp-cache-dir "$CACHE"
