@@ -13,7 +13,14 @@ set -eu
 REPO="$HOME/Projects/openssl"
 SPEC="$REPO/proof/punycode/wpacket_spec.h"
 CACHE="$REPO/proof/punycode/wp2-cache-dev"
-FCT="${WP2_FCT:-ossl_a2ulabel}"
+# Scope: ossl_a2ulabel plus codepoint2utf8, the one in-tree callee that is
+# reachable+defined but NOT covered by entry 1's decode-rooted proof. Without it
+# here, WP would ASSUME its contract (a silent, unchecked gap); in scope, its
+# contract is discharged (44 goals). The decode subtree (ossl_punycode_decode,
+# adapt, is_basic, digit_decoded) is deliberately NOT listed: its contracts are
+# assumed here and proved by entry 1's run_wp.sh. That split is what Task 3's
+# A-vs-B gate revisits before this folds into the production runner.
+FCT="${WP2_FCT:-ossl_a2ulabel,codepoint2utf8}"
 MODE="${1:-prove}"
 
 mkdir -p "$CACHE"
