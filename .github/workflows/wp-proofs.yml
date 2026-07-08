@@ -7,9 +7,12 @@
 
 name: Formal verification (WP proofs)
 # Runs the Frama-C/WP deductive proofs under proof/ (see proof/README.md).
-# Today this is one proof: ossl_punycode_decode in crypto/punycode.c is proved
-# memory-safe, divide-by-zero-free, and terminating for ALL inputs -- not tested,
-# proved, symbolically -- against the ACSL contracts written inline in that file.
+# Today this is one proof: ossl_a2ulabel in crypto/punycode.c -- and its entire
+# in-tree call tree, including ossl_punycode_decode -- is proved memory-safe,
+# divide-by-zero-free, and terminating for ALL inputs -- not tested, proved,
+# symbolically -- against the ACSL contracts written inline in that file. The
+# WPACKET functions the caller uses are the trust base (assumed contracts in
+# proof/punycode/wpacket_spec.h, audited against crypto/packet.c).
 #
 # The proof runs inside a version-pinned Docker toolchain (proof/docker/Dockerfile:
 # Frama-C 31.0 + Alt-Ergo + Z3 + cvc5, all pinned) and replays a committed WP
@@ -23,8 +26,8 @@ name: Formal verification (WP proofs)
 # to gate a stable RELEASE (not every PR) on a clean proof run.
 #
 # What a green check does and does NOT mean is spelled out by run_proofs.pl on
-# success (trust base, caller obligations, and that only ossl_punycode_decode --
-# not ossl_a2ulabel -- is in scope). Read that, not just the checkmark.
+# success (the trust base -- WPACKET + memmove contracts -- and the exact proved
+# scope rooted at ossl_a2ulabel). Read that, not just the checkmark.
 #
 # If a change of yours breaks the proof and you cannot repair the ACSL
 # annotations, the point of contact is David Foster (@davidfstr).
@@ -173,7 +176,7 @@ jobs:
         # continue-on-error keeps this from blocking the merge; the annotation and
         # summary make the regression visible to whoever touched the proved code.
         run: |
-          echo "::warning title=WP proof failed::A Frama-C/WP proof under proof/ did not pass. This does NOT block merge, but the proved property (e.g. memory safety of ossl_punycode_decode) is no longer verified. See the job summary; contact @davidfstr if you need help repairing the annotations."
+          echo "::warning title=WP proof failed::A Frama-C/WP proof under proof/ did not pass. This does NOT block merge, but the proved property (e.g. memory safety of ossl_a2ulabel and its call tree) is no longer verified. See the job summary; contact @davidfstr if you need help repairing the annotations."
           {
             echo '## :warning: WP proofs FAILED (non-blocking)';
             echo '';

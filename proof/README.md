@@ -57,18 +57,21 @@ Alt-Ergo, Z3, cvc5 on `PATH`):
 
 ## The Punycode proof
 
-Frama-C's WP plugin proves `ossl_punycode_decode()` (and its helpers `adapt`,
-`is_basic`, `digit_decoded`) in `crypto/punycode.c` against ACSL contracts
-written **inline in that source file** as `/*@ ... */` comments. WP is modular
-deductive verification: it discharges the obligations once, symbolically, for
-**all** inputs and buffer sizes -- no test vectors, no fuzzing, no bounded model.
+Frama-C's WP plugin proves `ossl_a2ulabel()` -- and its entire in-tree call tree
+(`codepoint2utf8`, `ossl_punycode_decode`, `adapt`, `is_basic`, `digit_decoded`,
+`ossl_assert_int`) -- in `crypto/punycode.c` against ACSL contracts written
+**inline in that source file** as `/*@ ... */` comments. WP is modular deductive
+verification: it discharges the obligations once, symbolically, for **all**
+inputs and buffer sizes -- no test vectors, no fuzzing, no bounded model.
 
-**Result: 104 / 104 goals proved in scope.** Every obligation in
-`ossl_punycode_decode` is discharged -- all memory safety (array bounds, the
-`memmove` region, and the CVE-2022-3602 scalar write `pDecoded[i]`), all
-division-by-zero, and full termination of all four loops and of `adapt`'s loop.
-Goals are closed by Qed + Alt-Ergo, with Z3 and cvc5 kept in the portfolio
-because no single solver proves everything (see the `run_wp.sh` header).
+**Result: 311 / 311 goals proved in scope.** Every obligation across the tree is
+discharged -- all memory safety (array bounds, the `memmove` region, the
+CVE-2022-3602 scalar write `pDecoded[i]`, and the `WPACKET` bump-pointer writes
+into `out` that bound the CVE-2022-3786 class), all division-by-zero, and full
+termination of every loop. Goals are closed by Qed + Alt-Ergo, with Z3 and cvc5
+kept in the portfolio because no single solver proves everything (see the
+`run_wp.sh` header). An earlier revision proved only the `ossl_punycode_decode`
+"island"; the proof now covers the outer entrypoint and everything it reaches.
 
 The proof was developed step-by-step; the full per-step reasoning for every flag
 lives in the header comment of `punycode/run_wp.sh`.
@@ -86,28 +89,50 @@ The result is "proven clean" *modulo* these, and any honest claim must state the
    *is* the assumption, confined to one generated stub: **"a libc `memmove` of
    `4k` bytes behaves as an element-wise move of `k` `uint32`s."**
 
-2. **Caller obligations** (the `requires` clauses -- discharged onto callers):
-   - `\valid_read(pEncoded + (0 .. enc_len-1))`, `\valid(pout_length)`,
-     `\valid(pDecoded + (0 .. *pout_length-1))` -- the buffers are as described.
-   - `enc_len <= UINT_MAX` -- needed for loop termination (the loop counters are
-     `unsigned int`). Upstream now enforces this at runtime with an explicit
-     `if (enc_len >= UINT_MAX) return 0;` guard at the top of the function.
-   - `*pout_length < UINT_MAX` -- **excludes a latent division-by-zero.** If
-     `*pout_length == UINT_MAX` were allowed, `written_out + 1` (passed as
-     `adapt`'s `unsigned int numpoints`) could wrap to 0, dividing by zero in
-     `adapt`. Unreachable from any sane caller (it needs a ~4-billion-char label;
-     DNS labels are <= 63 chars), but the function *in isolation* permits it, and
-     sound verification surfaced it. This one is **not** yet guarded upstream.
+2. **`WPACKET` contracts** (trust base -- assumed, not proved). `ossl_a2ulabel`
+   writes its output through `WPACKET_init_static_len` / `WPACKET_memcpy` /
+   `WPACKET_put_bytes__` / `WPACKET_cleanup`, whose bodies live in
+   `crypto/packet.c`, outside this proof's translation unit. Their ACSL contracts
+   are supplied by `proof/punycode/wpacket_spec.h` (force-included via
+   `-include`) and **assumed** -- WP checks `ossl_a2ulabel` against them but never
+   checks them against `packet.c`. They are scoped to exactly how `ossl_a2ulabel`
+   drives a fixed-buffer, no-length-prefix, forward-only `WPACKET` (captured by
+   the `wpacket_static_inv` predicate), and each `assigns`/`requires` range is
+   clipped to `min(written + len, maxsize)` to match `packet.c`'s own
+   reserve-then-write behaviour. That header must be re-audited by hand against
+   `packet.c` whenever the `WPACKET` implementation changes -- see its header
+   comment for the per-clause derivation.
 
-### Scope honesty
+3. **Caller obligations of `ossl_a2ulabel`** (the outer `requires` -- discharged
+   onto whoever calls it):
+   - `valid_read_string(in)` -- `in` is a NUL-terminated readable string.
+   - `strlen(in) <= PTRDIFF_MAX` -- needed for the `tmpptr - inptr` pointer
+     subtraction and the `size_t` cast of the label length.
+   - `\valid(out + (0 .. outlen-1))` and `\separated(in .. , out .. )` -- the
+     output buffer is writable and does not overlap the input.
 
-This proof covers `ossl_punycode_decode` **only** -- not `ossl_a2ulabel`, the
-`WPACKET`-based caller that actually held CVE-2022-3786. Decode is the tractable
-island; the CI gate does not verify the caller, so read no more assurance into a
-green check than the above states. The `check-scope` mode is a drift guard: it
-fails if any function reachable from `ossl_punycode_decode` and defined in-tree
-falls outside the proved allowlist (where WP would silently *assume* its contract
-rather than check it).
+   The `ossl_punycode_decode` `requires` from the earlier island proof are now
+   **internal**, discharged by `ossl_a2ulabel` at the call site rather than by an
+   external caller: it passes a 512-element `buf` (`bufsize = LABEL_BUF_SIZE`), so
+   `enc_len <= UINT_MAX` (the label length is bounded by the input) and
+   `*pout_length < UINT_MAX` (512) both hold. In particular the latent
+   division-by-zero that sound verification surfaced in decode *in isolation*
+   (reachable only with `*pout_length == UINT_MAX`, a ~4-billion-element output
+   buffer) is now **proved unreachable through this caller** -- `ossl_a2ulabel`
+   never offers decode a buffer that large.
+
+### Scope
+
+This proof covers `ossl_a2ulabel` and its full in-tree call tree, including
+`ossl_punycode_decode` -- the caller that held CVE-2022-3786 and the decoder that
+held CVE-2022-3602, respectively. The remaining assurance gap is the trust base
+above (WPACKET + `memmove` contracts), not an unproved caller. The `check-scope`
+mode is a drift guard with two parts: (a) it fails if any function reachable from
+`ossl_a2ulabel` and defined in-tree falls outside the proved allowlist (where WP
+would silently *assume* its contract rather than check it); and (b) a MUST_COVER
+floor fails loudly if either committed entrypoint -- `ossl_a2ulabel` or
+`ossl_punycode_decode` -- ever stops being reachable from the root, so a refactor
+can never silently retire their guarantee.
 
 ## Contact
 

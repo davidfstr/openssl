@@ -234,6 +234,11 @@ sub proof_cmd {
         @env = ("FRAMAC_WP_CACHE=$prof->{cache}",
                 "FRAMAC_WP_CACHEDIR=$prof->{dir}",
                 "FRAMAC_WP_PAR=$prof->{par}");
+        # Forward a per-goal timeout override into the container when set, so the
+        # committed cache can be regenerated on a slow/emulated toolchain (amd64
+        # image under QEMU) without false timeouts. Unset -> run_wp.sh default 30.
+        push @env, "FRAMAC_WP_TIMEOUT=$ENV{FRAMAC_WP_TIMEOUT}"
+            if defined $ENV{FRAMAC_WP_TIMEOUT};
     }
     if ($use_docker) {
         my @e = map { ("-e", $_) } @env;
@@ -343,21 +348,25 @@ for all inputs, for the functions in scope. This is NOT a test run; there are no
 input sizes it did not cover. But the result holds only MODULO an explicit trust
 base and set of caller obligations:
 
-  punycode (ossl_punycode_decode in crypto/punycode.c):
-    * TRUST BASE: one assumption, confined to a single generated stub --
-      a libc memmove of 4k bytes behaves as an element-wise move of k uint32s
-      (WP's typed memory model cannot relate byte-wise memmove to the uint32
-      buffer; -instantiate relocates the gap into memmove_uint's assigns clause).
-    * CALLER OBLIGATIONS (the requires clauses, discharged onto callers):
-        - the pEncoded / pDecoded / pout_length buffers are valid as described;
-        - enc_len <= UINT_MAX  (needed for termination; upstream also guards this
-          at runtime);
-        - *pout_length < UINT_MAX  (excludes a latent divide-by-zero in adapt;
-          unreachable from any sane caller, but real for the function in
-          isolation, and NOT guarded upstream).
-    * SCOPE: this proves ossl_punycode_decode ONLY. It does NOT verify
-      ossl_a2ulabel (the WPACKET-based caller that actually held CVE-2022-3786).
-      The check-scope guard confirms no reachable in-tree callee slipped outside
+  punycode (ossl_a2ulabel + its in-tree call tree in crypto/punycode.c):
+    * TRUST BASE: two sets of assumed contracts --
+        - a libc memmove of 4k bytes behaves as an element-wise move of k uint32s
+          (WP's typed memory model cannot relate byte-wise memmove to the uint32
+          buffer; -instantiate relocates the gap into memmove_uint's assigns);
+        - the WPACKET functions (init/memcpy/put_bytes/cleanup), whose bodies are
+          in crypto/packet.c outside this TU: their contracts in
+          proof/punycode/wpacket_spec.h are ASSUMED and hand-audited against
+          packet.c, not proved here.
+    * CALLER OBLIGATIONS of ossl_a2ulabel (the requires, discharged onto callers):
+        - in is a NUL-terminated string with strlen(in) <= PTRDIFF_MAX;
+        - out[0 .. outlen-1] is valid and does not overlap in.
+      (ossl_punycode_decode's old requires are now discharged INTERNALLY at the
+      call site -- in particular the latent divide-by-zero is proved unreachable
+      through this caller, which never offers decode a UINT_MAX-sized buffer.)
+    * SCOPE: this proves ossl_a2ulabel -- the WPACKET-based caller that actually
+      held CVE-2022-3786 -- together with ossl_punycode_decode (CVE-2022-3602) and
+      every other in-tree function reachable from it. The check-scope guard, with
+      its MUST_COVER floor, confirms no reachable in-tree callee slipped outside
       the proved set (where WP would merely ASSUME its contract).
 
 See proof/README.md for the full statement.

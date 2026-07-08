@@ -6,13 +6,23 @@
 # in the file LICENSE in the source distribution or at
 # https://www.openssl.org/source/license.html
 #
-# run_wp.sh -- Frama-C WP runner for ossl_punycode_decode in crypto/punycode.c.
+# run_wp.sh -- Frama-C WP runner for ossl_a2ulabel in crypto/punycode.c.
 #
-# Deductive verification (Frama-C WP) of ossl_punycode_decode() and its helpers
-# (adapt, is_basic, digit_decoded), proved against the ACSL contracts written
-# into crypto/punycode.c. Unlike a dynamic or bounded check, WP proves the
-# obligations ONCE, symbolically, for all inputs and buffer sizes; it needs no
-# driver harness because it is modular deductive verification.
+# Deductive verification (Frama-C WP) of ossl_a2ulabel() and its entire in-tree
+# call tree -- codepoint2utf8, ossl_punycode_decode, adapt, is_basic,
+# digit_decoded, ossl_assert_int -- proved against the ACSL contracts written
+# into crypto/punycode.c (and, for the assert helper, internal/common.h). Unlike
+# a dynamic or bounded check, WP proves the obligations ONCE, symbolically, for
+# all inputs and buffer sizes; it needs no driver harness because it is modular
+# deductive verification.
+#
+# ossl_a2ulabel is the WPACKET-based caller that actually held CVE-2022-3786;
+# ossl_punycode_decode (the CVE-2022-3602 locus) is proved as part of the same
+# tree. An earlier revision of this script proved ONLY the decode "island"; the
+# proof now covers the whole reachable closure from the outer entrypoint. The
+# WPACKET functions the caller uses are the one remaining trust base -- their
+# bodies live in crypto/packet.c OUTSIDE this TU and are ASSUMED via the
+# hand-audited contracts in wpacket_spec.h (see that file and proof/README.md).
 #
 # Normally invoked via ../run_proofs.pl (which supplies the pinned Docker
 # toolchain), but it also runs standalone against a local Frama-C install.
@@ -61,21 +71,44 @@
 #               move of k uint32s." State it in any claim about how proven-correct
 #               ossl_punycode_decode() is.
 #
-#   -cpp-extra-args=-I<repo>/include
-#               Frama-C preprocesses with -nostdinc and its own libc, so
-#               OpenSSL's headers (e_os2.h, crypto/punycode.h, internal/common.h,
-#               ...) are unfindable without the project include dir. With it the
-#               whole translation unit parses; the only residue is benign
-#               safestack.h cast warnings, outside our functions.
+#   -wp-model Typed+cast
+#               ossl_a2ulabel treats the output buffer as char* (its `out`
+#               parameter) and as unsigned char* (the WPACKET staticbuf and the
+#               codepoint2utf8 `seed` bytes), relying on those reinterpretations
+#               addressing the same storage. WP's default Typed model partitions
+#               memory by pointer type, so char*/unsigned char* casts are opaque
+#               and the WPACKET_memcpy separation + validity obligations cannot be
+#               stated; Typed+cast adds the byte-identity reasoning that closes
+#               them. The decode subtree uses no such casts and re-proves unchanged
+#               under this model, so ONE model covers the whole scope. (-wp-literals
+#               was used during development for the "xn--" strncmp-against-a-literal
+#               test; that test was later unrolled into per-char compares, so no
+#               string literal remains and the flag was dropped.)
 #
-#   -wp-fct ossl_punycode_decode,adapt,is_basic,digit_decoded
-#               Scope the obligation set to the proof's functions. WP is modular,
-#               so without this it would ALSO emit goals for the unannotated
-#               ossl_a2ulabel / codepoint2utf8 in the same file (their out[]
-#               writes, strchr/strlen preconditions, WPACKET machinery) -- noise
-#               we make no claims about. Scoping is exactly what separates "our
-#               proof" from "the rest of the file". SCOPE_FCTS below is the single
-#               source of truth for this list, shared with the check-scope guard.
+#   -cpp-extra-args=-I<repo>/include -include wpacket_spec.h
+#               -I<repo>/include: Frama-C preprocesses with -nostdinc and its own
+#               libc, so OpenSSL's headers (e_os2.h, crypto/punycode.h,
+#               internal/common.h, internal/packet.h, ...) are unfindable without
+#               the project include dir. With it the whole translation unit parses;
+#               the only residue is benign safestack.h cast warnings, outside our
+#               functions.
+#               -include wpacket_spec.h: force-include the TRUST-BASE ACSL
+#               contracts for the WPACKET functions ossl_a2ulabel calls
+#               (WPACKET_init_static_len, _memcpy, _put_bytes__, _cleanup). Their
+#               bodies are in crypto/packet.c, outside this TU, so WP ASSUMES these
+#               contracts; they are re-audited by hand against packet.c. This is
+#               the caller-side counterpart to the memmove_uint residue below.
+#
+#   -wp-fct ossl_a2ulabel,codepoint2utf8,ossl_punycode_decode,adapt,is_basic,digit_decoded,ossl_assert_int
+#               Scope the obligation set to the proof's functions -- the whole
+#               in-tree closure reachable from ossl_a2ulabel. WP is modular, so
+#               each listed function's body is proved against its own contract and
+#               its callees' contracts are assumed; listing the full closure means
+#               every in-tree callee's contract is also CHECKED, not merely
+#               assumed. The only assumed contracts left are the genuinely
+#               out-of-TU ones (WPACKET via wpacket_spec.h, memmove, OPENSSL_die).
+#               SCOPE_FCTS below is the single source of truth for this list,
+#               shared with the check-scope guard and its MUST_COVER floor.
 #
 #   -wp-timeout 30
 #               Generous per-goal timeout (~15x the time any goal needs on a
@@ -100,10 +133,13 @@
 #               them each run -- the single biggest robustness win against timeout
 #               flakiness. See the CACHE section for the modes.
 #
-# RESULT: 160 / 160 goals proved in scope. The only residue is the memmove_uint
-# trust-base stub described above. Scope honesty: this covers
-# ossl_punycode_decode ONLY, not ossl_a2ulabel (the WPACKET-based caller that
-# actually held CVE-2022-3786); decode is the tractable island.
+# RESULT: 311 / 311 goals proved in scope { ossl_a2ulabel, codepoint2utf8,
+# ossl_punycode_decode, adapt, is_basic, digit_decoded, ossl_assert_int }. The
+# trust-base residue is TWO stubs: the memmove_uint typed-assigns clause
+# described above, and the WPACKET contracts in wpacket_spec.h (assumed, audited
+# by hand against crypto/packet.c). Scope covers ossl_a2ulabel -- the
+# WPACKET-based caller that actually held CVE-2022-3786 -- and the full tree
+# below it, not just the decode island of earlier revisions.
 #
 # For a source-located view of all obligations, run:  ./run_wp.sh report
 # ----------------------------------------------------------------------------
@@ -155,17 +191,30 @@ MODE="${MODE:-prove}"
 PROVERS="alt-ergo,z3,cvc5"
 
 # Generous per-goal timeout so a slow runner never yields a false timeout red.
-TIMEOUT=30
+# Env-overridable (FRAMAC_WP_TIMEOUT): raise it when regenerating the cache on a
+# slow/emulated toolchain -- e.g. the amd64 pinned image under QEMU on an arm64
+# host runs the solvers ~10x slower, so goals that prove in well under 30s on
+# native CI need a larger budget just to be cached. Only bites on a cache MISS;
+# committed-cache replay never calls a solver.
+TIMEOUT="${FRAMAC_WP_TIMEOUT:-30}"
 
 # Canonical proof scope -- ONE source of truth, shared by the -wp-fct flag and
 # the check-scope guard. ENTRY is the reachability root; SCOPE_FCTS is ENTRY plus
 # every in-tree function reachable from it that we prove.
-SCOPE_ENTRY="ossl_punycode_decode"
-SCOPE_FCTS="ossl_punycode_decode adapt is_basic digit_decoded"
+SCOPE_ENTRY="ossl_a2ulabel"
+SCOPE_FCTS="ossl_a2ulabel codepoint2utf8 ossl_punycode_decode adapt is_basic digit_decoded ossl_assert_int"
+
+# MUST-COVER FLOOR for check-scope: the functions this proof COMMITS to keeping
+# in verified scope no matter how the call tree is refactored. These are the two
+# attacker-facing entrypoints (ossl_a2ulabel parses the label; ossl_punycode_decode
+# is the original CVE-2022-3786 locus). check-scope fails LOUDLY if either ever
+# falls out of the scope reachable from SCOPE_ENTRY -- see that mode's comment for
+# why a bare STALE/MISSING diff is not enough here.
+MUST_COVER="ossl_punycode_decode ossl_a2ulabel"
 
 # The source under proof and the flags the real translation unit needs.
 SRC="$REPO_ROOT/crypto/punycode.c"
-TARGET_CPP="-cpp-extra-args=-I$REPO_ROOT/include"
+TARGET_CPP="-cpp-extra-args=-I$REPO_ROOT/include -include $SCRIPT_DIR/wpacket_spec.h"
 TARGET_FCT="$(printf '%s' "$SCOPE_FCTS" | tr ' ' ',')"
 
 # CACHE: serve recorded proofs from a cache dir so a run skips the solvers on a
@@ -196,6 +245,7 @@ PAR="${FRAMAC_WP_PAR:-8}"
 # with separators stays one properly-quoted argument.
 set --
 set -- "$@" "$TARGET_CPP"
+set -- "$@" -wp-model Typed+cast
 set -- "$@" -instantiate -wp -wp-rte -wp-prover "$PROVERS" -wp-timeout "$TIMEOUT"
 set -- "$@" -wp-par "$PAR"
 set -- "$@" -wp-cache "$CACHE_MODE" -wp-cache-dir "$CACHE_DIR"
@@ -273,6 +323,37 @@ case "$MODE" in
                     }
                     for (k in seen) print k
                 }')"
+
+        # MUST-COVER FLOOR (runs BEFORE the STALE/MISSING diff, and short-circuits).
+        # The diff below keeps SCOPE_FCTS equal to the computed scope, but for a
+        # committed entrypoint that is the WRONG remedy: if a refactor makes
+        # ossl_punycode_decode unreachable from ossl_a2ulabel, the diff would emit
+        # "STALE: drop ossl_punycode_decode from SCOPE_FCTS" -- silently retiring
+        # the guarantee we promised. So first assert MUST_COVER is a subset of the
+        # computed (REACH ∩ DEFINED) scope, independent of SCOPE_FCTS (no list edit
+        # can paper over a genuine dropout). If this floor is breached, report only
+        # it and stop: a missing must-cover root makes any concurrent STALE/MISSING
+        # noise moot (you cannot sensibly fix both at once), and the remedy is the
+        # opposite of STALE's -- restore reachability or give the function its own
+        # proof root; never trim it away.
+        UNCOVERED="$( { printf 'R %s\n' $REACH; printf 'D %s\n' $DEFINED; printf 'M %s\n' $MUST_COVER; } \
+            | awk '
+                $1=="R"{r[$2]=1} $1=="D"{d[$2]=1} $1=="M"{m[$2]=1}
+                END { for (f in m) if (!(f in r) || !(f in d)) print f }' | sort)"
+        if [ -n "$UNCOVERED" ]; then
+            echo "check-scope FAILED: a MUST-COVER entrypoint fell out of the proof scope." >&2
+            echo "" >&2
+            printf '%s\n' "$UNCOVERED" | while read -r fn; do
+                echo "  [!] $fn  is a committed entrypoint but is NO LONGER reachable from" >&2
+                echo "      $SCOPE_ENTRY and defined in-tree, so it is no longer proved." >&2
+                echo "      This proof PROMISES to keep '$fn' verified. Do NOT drop it from" >&2
+                echo "      SCOPE_FCTS. Fix: restore the call path from $SCOPE_ENTRY, or give" >&2
+                echo "      '$fn' its own proof root (a separate proof/<name>/run_wp.sh)." >&2
+                echo "" >&2
+            done
+            echo "  MUST_COVER = { $MUST_COVER }" >&2
+            exit 1
+        fi
 
         # Diff computed (REACH ∩ DEFINED) against declared SCOPE_FCTS: one awk over
         # three labelled streams, one output line per discrepancy.
