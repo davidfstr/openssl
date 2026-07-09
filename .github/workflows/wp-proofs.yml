@@ -14,9 +14,10 @@ name: Formal verification (WP proofs)
 # WPACKET functions the caller uses are the trust base (assumed contracts in
 # proof/punycode/wpacket_spec.h, audited against crypto/packet.c).
 #
-# The proof runs inside a version-pinned Docker toolchain (proof/docker/Dockerfile:
-# Frama-C 31.0 + Alt-Ergo + Z3 + cvc5, all pinned) and replays a committed WP
-# proof cache (proof/punycode/wp-cache/), so a green run does not depend on any
+# The proof runs inside a version-pinned Docker toolchain
+# (proof/docker/Dockerfile.multiarch: Frama-C 31.0 + Alt-Ergo 2.5.4 built from
+# source via an opam lockfile that also pins why3 1.8.2) and replays a committed
+# WP proof cache (proof/punycode/wp-cache/), so a green run does not depend on any
 # solver being fast on the day -- it discharges every goal from the cache.
 #
 # NON-BLOCKING BY DESIGN: this job is continue-on-error, so a broken proof never
@@ -111,6 +112,14 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: proof/docker
+          # Build the from-source, multi-arch toolchain (Frama-C + Alt-Ergo via
+          # an opam lockfile), NOT the older amd64-only binary image. On this x86
+          # runner it builds the amd64 sub-image natively; the same Dockerfile
+          # builds arm64 natively on a developer's ARM host. Because the lockfile
+          # pins why3/Alt-Ergo identically on both, a committed cache regenerated
+          # locally replays here from the same toolchain. Alt-Ergo only -- no
+          # Z3/cvc5 -- so the cache is single-solver and deterministic.
+          file: proof/docker/Dockerfile.multiarch
           load: true
           tags: openssl-proof-tools
           cache-from: type=gha

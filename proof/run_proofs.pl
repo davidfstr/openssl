@@ -9,8 +9,9 @@
 # run_proofs.pl -- single entrypoint for the formal proofs under proof/.
 #
 # Runs every proof (today: punycode) inside a pinned Docker toolchain
-# (proof/docker/Dockerfile) so results are reproducible and cannot drift with
-# the host's Frama-C / solver versions. For each proof it runs the drift guard
+# (proof/docker/Dockerfile.multiarch, built from source so it runs natively on
+# the host arch) so results are reproducible and cannot drift with the host's
+# Frama-C / solver versions. For each proof it runs the drift guard
 # (check-scope) and then the proof itself (prove). Exit status is 0 iff every
 # step of every proof passes.
 #
@@ -56,6 +57,14 @@ use Cwd qw(abs_path getcwd);
 my $PROOF_DIR = dirname(abs_path($0));       # .../proof
 my $REPO_ROOT = dirname($PROOF_DIR);         # repo root
 my $IMAGE     = "openssl-proof-tools";       # locally-built pinned toolchain
+# The toolchain image is built FROM SOURCE via Dockerfile.multiarch so it runs
+# NATIVELY on the build host's arch (arm64 locally, amd64 in CI) rather than
+# under QEMU. This is what makes a --save cache regeneration fast off the x86
+# CI path -- and, because the lockfile pins why3/Alt-Ergo identically on both
+# arches, lets a cache regenerated on one arch replay on the other. (The older
+# amd64-only, Z3/cvc5-bearing proof/docker/Dockerfile is kept for the deferred
+# convergence decision but is no longer the one we build.)
+my $DOCKERFILE = "Dockerfile.multiarch";
 my $CONTACT   = "David Foster (\@davidfstr, david AT dafoster DOT net)";
 
 # --- options ---------------------------------------------------------------
@@ -114,8 +123,9 @@ ensure_generated_headers();
 # the slow base-image pull + solver install happens once per cache lifetime, not
 # every run.
 if ($use_docker && $build_image) {
-    print "=== building pinned proof toolchain ($IMAGE) ===\n";
-    my $rc = run_cmd("docker", "build", "-t", $IMAGE, "$PROOF_DIR/docker");
+    print "=== building pinned proof toolchain ($IMAGE, $DOCKERFILE) ===\n";
+    my $rc = run_cmd("docker", "build", "-t", $IMAGE,
+                     "-f", "$PROOF_DIR/docker/$DOCKERFILE", "$PROOF_DIR/docker");
     if ($rc != 0) {
         print STDERR <<"EOF";
 
