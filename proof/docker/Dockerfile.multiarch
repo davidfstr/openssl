@@ -1,0 +1,50 @@
+# Copyright 2026 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+#
+# Multi-arch proof toolchain (WIP; see proof/README.md).
+#
+# Unlike proof/docker/Dockerfile -- which uses the official amd64-ONLY
+# framac/frama-c image and so must run under QEMU on an arm64 host (~10x slower)
+# -- this builds Frama-C + Alt-Ergo FROM SOURCE via opam on a multi-arch base, so
+# it runs NATIVELY on whatever arch the host is (arm64 or amd64). The goal is a
+# single Dockerfile for local use on x86 + ARM hosts and for amd64 CI.
+#
+# SCOPE: Alt-Ergo only -- no Z3/cvc5. The punycode proof closes 311/311 on
+# Qed + Alt-Ergo 2.5.4 once the three strlen_shift crutch asserts are dropped;
+# the committed cache's Z3/cvc5 entries were only par=8 race winners, not needed.
+#
+# REPRODUCIBILITY / why the lockfile. The WP proof cache is keyed by a hash of the
+# goal task AS SERIALIZED THROUGH why3, so the cache is portable across arch ONLY
+# when the toolchain build is byte-identical -- and even a why3 PATCH bump changes
+# ~half the hashes (measured: why3 1.8.0 vs 1.8.2 -> 55/103 goals matched). A cache
+# built here must therefore replay against an identically-built toolchain. To make
+# that reproducible we do NOT `opam install <pkg>.<ver>` (transitive deps, why3
+# included, would float against the repo snapshot); instead we `opam switch import`
+# a committed full lockfile (multiarch.opam.export) that pins every one of the ~82
+# packages -- frama-c 31.0, alt-ergo 2.5.4, AND why3 1.8.2 -- to an exact version.
+# Regenerate it after any intended toolchain change with:
+#   docker run --rm <this-image> opam switch export - > proof/docker/multiarch.opam.export
+#
+# ocaml/opam:debian-12-ocaml-4.14 -- multi-arch (amd64, arm64, ppc64le, s390x).
+# Pinned by the manifest-LIST digest, so `docker build --platform <arch>` selects
+# the matching sub-image; the build arch is the host arch by default.
+FROM ocaml/opam:debian-12-ocaml-4.14@sha256:152ac355878a791984fa84367bd7e9852bd9b658f4141102b3ee0719b31c4c7c
+
+ARG ALTERGO_VER=2.5.4
+
+# Install the exact pinned switch from the lockfile. opam 2.x resolves external
+# (apt) deps via sudo during the build; the ocaml/opam image grants the opam user
+# passwordless sudo, so no explicit apt step is needed.
+COPY --chown=opam:opam multiarch.opam.export /tmp/multiarch.opam.export
+RUN opam switch import --yes /tmp/multiarch.opam.export && rm /tmp/multiarch.opam.export
+
+# WP dispatches provers through why3, which only knows a solver after an explicit
+# detect pass writes it into why3.conf. Then fail the build if WP cannot see the
+# pinned Alt-Ergo (guards against a silent resolution drift to another version).
+RUN set -eux; \
+    opam exec -- why3 config detect; \
+    opam exec -- frama-c -wp-detect | grep -q "Alt-Ergo ${ALTERGO_VER}"

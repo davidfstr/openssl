@@ -8,10 +8,11 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <openssl/e_os2.h>
 #include "crypto/punycode.h"
-#include "internal/common.h" /* for HAS_PREFIX */
+#include "internal/common.h" /* for ossl_assert */
 #include "internal/packet.h" /* for WPACKET */
 
 static const unsigned int base = 36;
@@ -26,6 +27,10 @@ static const char delimiter = '-';
 
 #define LABEL_BUF_SIZE 512
 
+/*
+ * Computes a new "bias" value, which is a logarithm-like measure of the most
+ * recent "delta"'s magnitude.
+ */
 /*-
  * Pseudocode:
  *
@@ -40,7 +45,9 @@ static const char delimiter = '-';
  *  end
  *  return k + (((base - tmin + 1) * delta) div (delta + skew))
  */
-
+/*@ requires numpoints >= 1;
+    assigns \nothing;
+*/
 static int adapt(unsigned int delta, unsigned int numpoints,
     unsigned int firsttime)
 {
@@ -49,6 +56,9 @@ static int adapt(unsigned int delta, unsigned int numpoints,
     delta = (firsttime) ? delta / damp : delta / 2;
     delta = delta + delta / numpoints;
 
+    /*@ loop assigns delta, k;
+        loop variant delta;
+    */
     while (delta > ((base - tmin) * tmax) / 2) {
         delta = delta / (base - tmin);
         k = k + base;
@@ -57,6 +67,7 @@ static int adapt(unsigned int delta, unsigned int numpoints,
     return k + (((base - tmin + 1) * delta) / (delta + skew));
 }
 
+/*@ assigns \nothing; */
 static ossl_inline int is_basic(unsigned int a)
 {
     return (a < 0x80) ? 1 : 0;
@@ -69,6 +80,7 @@ static ossl_inline int is_basic(unsigned int a)
  * 61..7A (a-z) =  0 to 25, respectively
  * 30..39 (0-9) = 26 to 35, respectively
  */
+/*@ assigns \nothing; */
 static ossl_inline int digit_decoded(const unsigned char a)
 {
     if (a >= 0x41 && a <= 0x5A)
@@ -83,6 +95,21 @@ static ossl_inline int digit_decoded(const unsigned char a)
     return -1;
 }
 
+/*-
+ * Decodes a buffer of Punycode bytes (pEncoded, length enc_len) to a
+ * UTF-32 buffer (pDecoded, capacity *pout_length). Returns 1 on success,
+ * else 0. On success stores the length of the decoded UTF-32 string in
+ * *pout_length.
+ *
+ * Examples:
+ * - "" -> ""                   (empty string)
+ * - "a-" -> U"a"               (only ASCII codepoints)
+ * - "Mnchen-3ya" -> U"München" (1 non-ASCII codepoint; rest are ASCII)
+ * - "mxacd" -> U"αβγ"          (all non-ASCII codepoints)
+ *
+ * Special preconditions:
+ * - The caller MUST ensure (*pout_length < UINT_MAX) to avoid a divide-by-zero.
+ */
 /*-
  * Pseudocode:
  *
@@ -115,7 +142,16 @@ static ossl_inline int digit_decoded(const unsigned char a)
  *    increment i
  *  end
  */
-
+/*@ requires enc_len >= 0;
+    requires \valid_read(pEncoded + (0 .. enc_len - 1));
+    requires \valid(pout_length);
+    requires *pout_length >= 0;
+    requires *pout_length < UINT_MAX;
+    requires \valid(pDecoded + (0 .. *pout_length - 1));
+    requires \separated(pout_length, pDecoded + (0 .. *pout_length - 1));
+    assigns *pout_length, pDecoded[0 .. *pout_length - 1];
+    ensures *pout_length <= \old(*pout_length);
+*/
 int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
     unsigned int *pDecoded, unsigned int *pout_length)
 {
@@ -130,15 +166,44 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
 
     if (enc_len >= UINT_MAX)
         return 0;
+
+    /*
+     * Search for the last '-' delimiter, storing the number of
+     * probably-ASCII codepoints preceding the dash in basic_count, or 0 if
+     * the dash was not found.
+     */
+    /*@ loop invariant 0 <= loop <= enc_len;
+        loop invariant
+            (basic_count == enc_len == 0) ||
+            (0 <= basic_count < enc_len);
+        loop assigns loop, basic_count;
+        loop variant enc_len - loop;
+    */
     for (loop = 0; loop < (unsigned int)enc_len; loop++) {
         if (pEncoded[loop] == delimiter)
             basic_count = loop;
     }
+    /*@ assert
+            (basic_count == enc_len == 0) ||
+            (0 <= basic_count < enc_len);
+    */
 
+    /* Copy leading ASCII codepoints from input to output buffer, if any. */
     if (basic_count > 0) {
+        /*@ assert 0 <= basic_count < enc_len; */
+
         if (basic_count > max_out)
             return 0;
 
+        /*
+         * 1. Verify that all codepoints preceding the last dash are ASCII.
+         * 2. Copy those ASCII codepoints from input to output buffer.
+         */
+        /*@ loop invariant 0 <= loop <= basic_count;
+            loop invariant written_out == loop;
+            loop assigns loop, written_out, pDecoded[0 .. basic_count - 1];
+            loop variant basic_count - loop;
+        */
         for (loop = 0; loop < basic_count; loop++) {
             if (is_basic(pEncoded[loop]) == 0)
                 return 0;
@@ -148,16 +213,32 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
         }
         processed_in = basic_count + 1;
     }
+    /*@ assert 0 <= processed_in <= enc_len; */
+    /*@ assert (written_out == 0) || (written_out == basic_count); */
 
+    /* Insert each decoded non-ASCII codepoint into output buffer */
+    /*@ loop invariant processed_in <= loop <= enc_len;
+        loop invariant (written_out == 0) || (0 <= written_out <= max_out);
+        loop assigns loop, i, bias, n, pDecoded[0 .. max_out - 1], written_out;
+        loop variant enc_len - loop;
+    */
     for (loop = processed_in; loop < (unsigned int)enc_len;) {
         unsigned int oldi = i;
         unsigned int w = 1;
         unsigned int k, t;
         int digit;
 
+        /* Decode a "delta" variable-length integer (i - oldi) */
+        /*@ loop invariant processed_in <= loop <= enc_len;
+            loop invariant w >= 1;
+            loop invariant loop >= \at(loop, LoopEntry);
+            loop assigns k, digit, loop, i, t, w;
+            loop variant enc_len - loop;
+        */
         for (k = base;; k += base) {
             if (loop >= enc_len)
                 return 0;
+            /*@ assert 0 <= processed_in <= loop < enc_len; */
 
             digit = digit_decoded(pEncoded[loop]);
             loop++;
@@ -170,24 +251,36 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
             i = i + digit * w;
             t = (k <= bias) ? tmin : (k >= bias + tmax) ? tmax
                                                         : k - bias;
+            /*@ assert tmin <= t <= tmax; */
 
             if ((unsigned int)digit < t)
                 break;
 
+            /*@ assert (base - t) > 0; */
             if (w > maxint / (base - t))
                 return 0;
+            /*@ assert w * (base - t) <= maxint; */
             w = w * (base - t);
         }
 
+        /* Compute a new "bias" value, based on the last "delta" (i - oldi) */
+        /*@ assert written_out + 1 <= UINT_MAX; */
         bias = adapt(i - oldi, written_out + 1, (oldi == 0));
+        /* Compute codepoint to insert: n */
         if (i / (written_out + 1) > maxint - n)
             return 0;
         n = n + i / (written_out + 1);
+        /* Compute index to insert at: i */
         i %= (written_out + 1);
+        /*@ assert 0 <= i <= written_out; */
 
+        /* Fail if inserting a codepoint would overflow output capacity */
         if (written_out >= max_out)
             return 0;
+        /*@ assert written_out < max_out; */
 
+        /* Insert codepoint n at index i, shifting old ones to the right */
+        /*@ assert 0 <= i < max_out; */
         memmove(pDecoded + i + 1, pDecoded + i,
             (written_out - i) * sizeof(*pDecoded));
         pDecoded[i] = n;
@@ -204,6 +297,10 @@ int ossl_punycode_decode(const char *pEncoded, const size_t enc_len,
  * return number of bytes on success, 0 on failure
  * (also produces U+FFFD, which uses 3 bytes on failure)
  */
+/*@ requires \valid(out + (0 .. 4));
+    assigns out[0 .. 4];
+    ensures 0 <= \result <= 4;
+*/
 static int codepoint2utf8(unsigned char *out, unsigned long utf)
 {
     if (utf <= 0x7F) {
@@ -248,7 +345,12 @@ static int codepoint2utf8(unsigned char *out, unsigned long utf)
  * 0 - ok but buf was too short
  * -1 - bad string passed or other error
  */
-
+/*@ requires valid_read_string(in);
+    requires strlen(in) <= PTRDIFF_MAX; // needed for: tmpptr - inptr
+    requires \valid(out + (0 .. outlen - 1));
+    requires \separated(in + (0 .. strlen(in)), out + (0 .. outlen - 1));
+    exits \true; // no guarantees declared upon exit
+*/
 int ossl_a2ulabel(const char *in, char *out, size_t outlen)
 {
     /*-
@@ -267,24 +369,103 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
     if (!ossl_assert(out != NULL))
         return -1;
 
-    if (!WPACKET_init_static_len(&pkt, (unsigned char *)out, outlen, 0))
+    /* Isolate cast to simplify downstream proofs */
+    unsigned char *out2 = (unsigned char *)out;
+    if (!WPACKET_init_static_len(&pkt, out2, outlen, 0))
         return -1;
 
+    /*@ loop invariant sep_in_out: \separated(
+            in + (0 .. strlen(in)),
+            out + (0 .. outlen - 1));
+        loop invariant pkt_inv: wpacket_static_inv(&pkt);
+        loop invariant pkt_buf: pkt.staticbuf == out2;
+        loop invariant pkt_max: pkt.maxsize == outlen;
+        loop invariant inptr_str: valid_read_string(inptr);
+        loop invariant inptr_len: strlen(inptr) <= PTRDIFF_MAX;
+        loop invariant inptr_lo: in <= inptr;
+        loop invariant inptr_hi: inptr <= in + strlen(in);
+        loop invariant inptr_in_end_eq:
+            inptr + strlen(inptr) == in + strlen(in);
+        loop assigns inptr, result, i,
+            buf[0 .. LABEL_BUF_SIZE - 1],
+            pkt.curr, pkt.written,
+            out[0 .. outlen - 1];
+        loop variant in + strlen(in) - inptr;
+    */
     while (1) {
         const char *tmpptr = strchr(inptr, '.');
         size_t delta = tmpptr != NULL ? (size_t)(tmpptr - inptr) : strlen(inptr);
 
-        if (!HAS_PREFIX(inptr, "xn--")) {
+        /* Help provers derive:
+         * (found a '.') ==> (len of suffix after '.' <= strlen(inptr)) */
+        /*@ assert delta_le_inptr_len: tmpptr != \null ==>
+                0 <= tmpptr - inptr <= strlen(inptr); */
+        /*@ // Match strlen_shift axiom's strlen(s + i) shape
+            // so that WP recognizes it. Do not simplify.
+            assert tmpptr_len:         tmpptr != \null ==>
+                strlen(inptr + (tmpptr - inptr)) == strlen(inptr) - (tmpptr - inptr); */
+        /*@ assert tmpptr_len2:        tmpptr != \null ==>
+                strlen(tmpptr) == strlen(inptr) - (tmpptr - inptr); */
+        /*@ assert tmpptr_len3:        tmpptr != \null ==>
+                strlen(tmpptr) <= strlen(inptr); */
+        /*@ assert when_dot_next_len:  tmpptr != \null ==>
+                strlen(tmpptr + 1) <= PTRDIFF_MAX; */
+
+        /* if (!HAS_PREFIX(inptr, "xn--")): Proofs have difficulty reasoning
+         * about string literals. This prefix is short enough that unrolling
+         * is legible to both humans and provers. */
+        if (!(inptr[0] == 'x' && inptr[1] == 'n' && inptr[2] == '-' && inptr[3] == '-')) {
+            /* Help provers derive:
+             * (in & out separated) ==> (in substring & out separated) */
+            /*@ assert sep_in_out_cast: \separated(
+                    in + (0 .. strlen(in)),
+                    out2 + (0 .. outlen - 1)); */
+            /*@ assert sep_in_substr_out: \separated(
+                    inptr + (0 .. delta - 1),
+                    out2 + (0 .. outlen - 1)); */
+            /*@ assert sep_in_substr_out_cast: \separated(
+                    (unsigned char *)inptr + (0 .. delta - 1),
+                    out2 + (0 .. outlen - 1)); */
             if (!WPACKET_memcpy(&pkt, inptr, delta))
                 result = 0;
         } else {
             unsigned int bufsize = LABEL_BUF_SIZE;
 
+            /*
+             * The label starts with "xn--". Neither '.' nor NUL occurs in that
+             * prefix. Thus the decode call, reading after the prefix, still
+             * reads from a substring of in up to the next '.' or NUL.
+             */
+            /*@ assert dot_at_tmpptr: tmpptr != \null ==> *tmpptr == '.'; */
+            /*@ assert dot_far:  tmpptr != \null ==> tmpptr - inptr >= 4; */
+            /*@ assert dot_far2: tmpptr != \null ==> tmpptr - inptr <= PTRDIFF_MAX; */
+            /*@ assert dot_far3: tmpptr != \null ==> (size_t)(tmpptr - inptr) >= 4; */
+            /*@ assert dot_far4: tmpptr != \null ==> delta >= 4; */
+            /*@ assert nul_far:              strlen(inptr) >= 4; */
+            /*@ assert nul_far2: tmpptr == \null ==> delta >= 4; */
+            /*@ assert dot_or_nul_far:               delta >= 4; */
             if (ossl_punycode_decode(inptr + 4, delta - 4, buf, &bufsize) <= 0) {
                 result = -1;
                 goto end;
             }
 
+            /*@ loop invariant sep_in_out2: \separated(
+                    in + (0 .. strlen(in)),
+                    out + (0 .. outlen - 1));
+                loop invariant pkt_inv2: wpacket_static_inv(&pkt);
+                loop invariant pkt_buf2: pkt.staticbuf == out2;
+                loop invariant pkt_max2: pkt.maxsize == outlen;
+                loop invariant when_dot_next_str: tmpptr != \null ==>
+                    valid_read_string(tmpptr + 1);
+                loop invariant when_dot_next_len2: tmpptr != \null ==>
+                    strlen(tmpptr + 1) <= PTRDIFF_MAX;
+                loop invariant when_dot_next_end_eq: tmpptr != \null ==>
+                    (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in);
+                loop assigns result, i,
+                    pkt.curr, pkt.written,
+                    out[0 .. outlen - 1];
+                loop variant bufsize - i;
+            */
             for (i = 0; i < bufsize; i++) {
                 unsigned char seed[6];
                 size_t utfsize = codepoint2utf8(seed, buf[i]);
@@ -305,6 +486,9 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
         if (!WPACKET_put_bytes_u8(&pkt, '.'))
             result = 0;
 
+        /*@ assert next_str: valid_read_string(tmpptr + 1); */
+        /*@ assert next_len: strlen(tmpptr + 1) <= PTRDIFF_MAX; */
+        /*@ assert next_end_eq: (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in); */
         inptr = tmpptr + 1;
     }
 

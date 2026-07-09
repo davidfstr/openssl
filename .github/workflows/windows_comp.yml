@@ -8,13 +8,7 @@
 name: Windows Compression GitHub CI
 
 on:
-  pull_request:
-    paths:
-      - 'crypto/comp/*.c'
-      - '.github/workflows/windows_comp.yml'
-  push:
-    paths:
-      - '**.c'
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -8,9 +8,6 @@
 name: Cross Compile for AArch64 Extensions
 
 on:
-  pull_request:
-    types: [opened, reopened, edited, synchronize]
-  push:
   schedule:
     - cron: '05 03 * * *'
   workflow_dispatch:

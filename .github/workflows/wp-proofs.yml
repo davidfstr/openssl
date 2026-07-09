@@ -1,0 +1,199 @@
+# Copyright 2026 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
+name: Formal verification (WP proofs)
+# Runs the Frama-C/WP deductive proofs under proof/ (see proof/README.md).
+# Today this is one proof: ossl_a2ulabel in crypto/punycode.c -- and its entire
+# in-tree call tree, including ossl_punycode_decode -- is proved memory-safe,
+# divide-by-zero-free, and terminating for ALL inputs -- not tested, proved,
+# symbolically -- against the ACSL contracts written inline in that file. The
+# WPACKET functions the caller uses are the trust base (assumed contracts in
+# proof/punycode/wpacket_spec.h, audited against crypto/packet.c).
+#
+# The proof runs inside a version-pinned Docker toolchain
+# (proof/docker/Dockerfile.multiarch: Frama-C 31.0 + Alt-Ergo 2.5.4 built from
+# source via an opam lockfile that also pins why3 1.8.2) and replays a committed
+# WP proof cache (proof/punycode/wp-cache/), so a green run does not depend on any
+# solver being fast on the day -- it discharges every goal from the cache.
+#
+# NON-BLOCKING BY DESIGN: this job is continue-on-error, so a broken proof never
+# blocks a merge; instead it raises a warning annotation and a step summary. The
+# intent is to gain experience running proofs in CI (and to shake out any
+# flakiness) before considering making them gate anything. A future step could be
+# to gate a stable RELEASE (not every PR) on a clean proof run.
+#
+# What a green check does and does NOT mean is spelled out by run_proofs.pl on
+# success (the trust base -- WPACKET + memmove contracts -- and the exact proved
+# scope rooted at ossl_a2ulabel). Read that, not just the checkmark.
+#
+# If a change of yours breaks the proof and you cannot repair the ACSL
+# annotations, the point of contact is David Foster (@davidfstr).
+
+on:
+  pull_request:
+    paths:
+      - 'crypto/punycode.c'
+      - 'proof/**'
+      - '.github/workflows/wp-proofs.yml'
+  schedule:
+    # Daily drift backstop: catches toolchain/base-image rot even when nobody
+    # touches the proved code.
+    - cron: '30 04 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wp-proofs:
+    # Only run the scheduled backstop on the canonical repo; PR and manual runs
+    # still work on forks (so contributors get proof feedback on their own CI).
+    if: github.event_name != 'schedule' || github.repository == 'openssl/openssl'
+    name: WP proofs
+    runs-on: ubuntu-latest
+    # Non-blocking: a failed proof must not fail the workflow run / block a merge.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Enable containerd image store (fast buildx --load)
+        # Without this, `buildx build --load` of our ~2GB image spent 130-180s per
+        # run in "importing to docker": the default image store makes the daemon
+        # re-import the loaded image tarball. The containerd image store lets the
+        # daemon ingest that image into its shared content store as a near-instant
+        # metadata op ("importing to docker" is now 0s). (It does NOT remove the
+        # separate export/send cost on the builder side -- see the build step.)
+        run: |
+          set -eux
+          sudo mkdir -p /etc/docker
+          echo '{"features":{"containerd-snapshotter":true}}' \
+            | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format 'image store driver: {{json .DriverStatus}}'
+
+      - name: Set up Docker Buildx
+        # Provides the buildkit builder that can export/import the build cache to
+        # the GitHub Actions cache (cache-to/from type=gha) below.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build pinned proof toolchain image (GHA layer cache)
+        # The slow part of a run is building this image: the large frama-c base is
+        # pulled from Docker Hub (throttled, anonymous) and the Z3/cvc5 install
+        # RUN steps execute. We persist the layers in the GitHub Actions cache, so
+        # after the first run buildx reconstructs the image from GHA's in-network
+        # store and skips the RUN steps entirely. load: true puts the tagged image
+        # into the docker daemon so run_proofs.pl --no-build can `docker run` it.
+        # The daily cron keeps this cache warm (GHA evicts caches idle for 7 days).
+        #
+        # COST / KNOWN LIMITATION: this step steady-states around 1m50s, almost all
+        # of it (~1m40s) spent in "#9 exporting to oci image format / sending
+        # tarball". cache-to type=gha REQUIRES the docker-container buildx driver,
+        # which is a separate buildkit instance that does NOT share the daemon's
+        # image store -- so load: true must serialize the whole ~2GB image to an OCI
+        # tarball and stream it to the daemon every run. (The default "docker"
+        # driver loads for free via the containerd store above, but cannot export a
+        # type=gha cache -- you can't have both from one builder.)
+        #
+        # This ~1m10s could be eliminated by publishing the built image to GHCR once
+        # and having warm runs `docker pull` it straight into the containerd store
+        # (skipping both the build and the tarball send, ~40s total). That was
+        # judged not worth it here: it publishes the toolchain image to an external
+        # namespace, needs packages:write + a registry login, and adds
+        # pull-or-build-on-miss logic -- too much machinery for a non-blocking check
+        # that is already down from 3m30s to under 2m.
+        uses: docker/build-push-action@v6
+        with:
+          context: proof/docker
+          # Build the from-source, multi-arch toolchain (Frama-C + Alt-Ergo via
+          # an opam lockfile), NOT the older amd64-only binary image. On this x86
+          # runner it builds the amd64 sub-image natively; the same Dockerfile
+          # builds arm64 natively on a developer's ARM host. Because the lockfile
+          # pins why3/Alt-Ergo identically on both, a committed cache regenerated
+          # locally replays here from the same toolchain. Alt-Ergo only -- no
+          # Z3/cvc5 -- so the cache is single-solver and deterministic.
+          file: proof/docker/Dockerfile.multiarch
+          load: true
+          tags: openssl-proof-tools
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run WP proofs (committed cache --load / replay, prebuilt image)
+        # For every proof, runs check-scope then verifies against the committed
+        # wp-cache/ in REPLAY mode: a cache HIT replays the recorded proof with no
+        # solver call (deterministic, cannot flake on solver timing), while a cache
+        # MISS still runs the solvers live -- so a change that shifts the WP goals
+        # is actually RE-PROVED here, not merely reported as "cache stale". The job
+        # therefore answers the question a contributor actually has ("does my change
+        # still prove?"), separately from the maintenance question ("is the cache
+        # fresh?"). It exits non-zero ONLY on a real regression -- an unproven goal
+        # or scope drift. A run that still proves but whose committed cache is out of
+        # date exits 0 and is surfaced as an advisory below, not a failure.
+        # --no-build reuses the image built and cached by the step above.
+        run: |
+          set -o pipefail
+          ./proof/run_proofs.pl --load --no-build 2>&1 | tee "$RUNNER_TEMP/wp-proofs.log"
+
+      - name: Record success (trust base travels with the result)
+        if: success()
+        # run_proofs.pl exits 0 both when the committed cache is fresh AND when it
+        # is stale-but-still-proving (the solvers re-derived the missed goals live).
+        # Tell the two apart by the advisory banner in the log: a stale run stays
+        # green but raises a warning + a "please regenerate the cache" note, so a
+        # contributor sees "the proof still holds" rather than a red X telling them
+        # to run a tool. Either way the success banner restates the trust base,
+        # caller obligations, and scope, so the green check is never read as an
+        # unqualified "memory-safe, no caveats".
+        run: |
+          if grep -q 'COMMITTED CACHE STALE' "$RUNNER_TEMP/wp-proofs.log"; then
+            echo "::warning title=WP proof cache stale::The WP proofs still PASS, but proof/*/wp-cache/ is out of date, so the solvers had to re-derive the changed goals live (slower, small false-timeout risk). Regenerate with ./proof/run_proofs.pl --save and commit. This is NOT a proof failure."
+            {
+              echo '## :white_check_mark: WP proofs passed &mdash; :warning: committed cache stale';
+              echo '';
+              echo 'Every obligation was proved symbolically for all inputs &mdash; the';
+              echo 'proof HOLDS &mdash; but the committed proof cache no longer matches the';
+              echo 'current goals, so the solvers re-derived the changed goals live.';
+              echo 'Refresh it with `./proof/run_proofs.pl --save` and commit';
+              echo 'proof/*/wp-cache/.';
+              echo '';
+              echo '```';
+              sed -n '/ALL PROOFS PASSED/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
+              sed -n '/COMMITTED CACHE STALE/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
+              echo '```';
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo '## WP proofs passed';
+              echo '';
+              echo 'Proved symbolically for all inputs, modulo the trust base below.';
+              echo '';
+              echo '```';
+              sed -n '/ALL PROOFS PASSED/,/====/p' "$RUNNER_TEMP/wp-proofs.log";
+              echo '```';
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Flag proof failure (non-blocking warning)
+        if: failure()
+        # continue-on-error keeps this from blocking the merge; the annotation and
+        # summary make the regression visible to whoever touched the proved code.
+        run: |
+          echo "::warning title=WP proof failed::A Frama-C/WP proof under proof/ did not pass. This does NOT block merge, but the proved property (e.g. memory safety of ossl_a2ulabel and its call tree) is no longer verified. See the job summary; contact @davidfstr if you need help repairing the annotations."
+          {
+            echo '## :warning: WP proofs FAILED (non-blocking)';
+            echo '';
+            echo 'A verification obligation could not be discharged, or the proved';
+            echo 'function scope drifted. This does not block the merge, but the';
+            echo 'proved property is no longer verified. Full log:';
+            echo '';
+            echo '```';
+            cat "$RUNNER_TEMP/wp-proofs.log";
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"

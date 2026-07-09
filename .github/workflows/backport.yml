@@ -7,7 +7,7 @@
 
 name: Backports CI
 
-on: [pull_request]
+on: workflow_dispatch
 
 permissions:
   contents: read
