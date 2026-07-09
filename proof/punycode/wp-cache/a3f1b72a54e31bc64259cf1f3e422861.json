@@ -1,2 +1,2 @@
-{ "prover": "Alt-Ergo:2.5.4", "verdict": "valid", "time": 0.263,
+{ "prover": "Alt-Ergo:2.5.4", "verdict": "valid", "time": 0.0131,
   "steps": 64 }

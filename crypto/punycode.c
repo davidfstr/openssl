@@ -488,16 +488,6 @@ int ossl_a2ulabel(const char *in, char *out, size_t outlen)
 
         /*@ assert next_str: valid_read_string(tmpptr + 1); */
         /*@ assert next_len: strlen(tmpptr + 1) <= PTRDIFF_MAX; */
-        /* Re-derive the suffix/terminator equality at the latch by spelling out
-         * the two strlen_shift steps (as at the loop top). Older SMT solvers do
-         * not reconstruct this across the WPACKET havoc in one shot, so the
-         * intermediate steps are made explicit and CI's committed cache records
-         * their proofs. */
-        /*@ assert mid_inptr_eq: inptr + strlen(inptr) == in + strlen(in); */
-        /*@ assert next_shift_inptr:
-                strlen(tmpptr) == strlen(inptr) - (tmpptr - inptr); */
-        /*@ assert next_shift_tmpptr:
-                strlen(tmpptr + 1) == strlen(tmpptr) - 1; */
         /*@ assert next_end_eq: (tmpptr + 1) + strlen(tmpptr + 1) == in + strlen(in); */
         inptr = tmpptr + 1;
     }
