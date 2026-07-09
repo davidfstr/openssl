@@ -46,15 +46,21 @@
 #               digit_decoded's signed subtractions are discharged trivially.
 #               The real proof task is bounds + nonzero-divisors + termination.
 #
-#   -wp-prover alt-ergo,z3,cvc5
-#               Race all three SMT solvers per goal; the result is the UNION of
-#               their strengths. No single solver dominates: e.g. the assert
-#               "0 <= i <= written_out" after "i %= (written_out + 1)" needs the
-#               mod axiom + size_t->uint truncation + a loop invariant, a
-#               multi-theory step Alt-Ergo alone misses but Z3/cvc5 close; yet
-#               cvc5 ALONE would lose "loop invariant w >= 1" (the nonlinear
-#               w*(base-t) step) that Alt-Ergo and Z3 prove. Never narrow the
-#               portfolio to "the newest solver".
+#   -wp-prover alt-ergo   (override: FRAMAC_WP_PROVERS)
+#               Alt-Ergo 2.5.4 ALONE closes every goal in the consolidated proof
+#               (measured: 311/311 = 203 Qed + 100 Alt-Ergo, 0 residual). This is
+#               why the pinned toolchain (proof/docker/Dockerfile.multiarch) ships
+#               Alt-Ergo only -- dropping Z3/cvc5 is what lets it build from source
+#               natively on both arm64 and amd64. Referencing an absent prover is a
+#               HARD abort in WP (deferred "Prover not found" user error), even if
+#               Alt-Ergo already discharged the goal, so the default must name only
+#               provers the image actually has.
+#               HISTORY: an earlier decode-only proof needed a Z3/cvc5 portfolio
+#               (e.g. the "0 <= i <= written_out" mod-axiom assert Alt-Ergo then
+#               missed); Alt-Ergo 2.5.4 now closes those, so the portfolio is no
+#               longer required. To race a fuller set on a host that has them, set
+#               FRAMAC_WP_PROVERS=alt-ergo,z3,cvc5 -- but the committed cache is
+#               single-solver, so mixing solvers only matters off the cached path.
 #
 #   -instantiate
 #               Bridge the typed-vs-byte memory-model gap at the memmove call.
@@ -187,8 +193,9 @@ for arg in "$@"; do
 done
 MODE="${MODE:-prove}"
 
-# Race Alt-Ergo + Z3 + cvc5 per goal (union of their strengths -- see header).
-PROVERS="alt-ergo,z3,cvc5"
+# Alt-Ergo alone closes every goal; it is the only solver in the pinned image.
+# Override with FRAMAC_WP_PROVERS to race a fuller portfolio where available.
+PROVERS="${FRAMAC_WP_PROVERS:-alt-ergo}"
 
 # Generous per-goal timeout so a slow runner never yields a false timeout red.
 # Env-overridable (FRAMAC_WP_TIMEOUT): raise it when regenerating the cache on a
